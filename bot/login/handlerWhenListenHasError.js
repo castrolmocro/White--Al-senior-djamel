@@ -74,8 +74,8 @@ module.exports = async function ({ api, threadModel, userModel, dashBoardModel, 
         /* ___ Example send a message to WEBHOOK DISCORD when bot has error ___ */
         if (configNotiWhenListenMqttError.discordHook?.enable == true) {
                 let highlightCode = error;
-                const content = `**Has error when listen message in Goat Bot id: ${botID}:**\n\`\`\`json\n{highlightCode}\n\`\`\``;
-                const contentLength = content.replace("{highlightCode}").length;
+                const contentTemplate = `**Has error when listen message in Goat Bot id: ${botID}:**\n\`\`\`json\n{highlightCode}\n\`\`\``;
+                const contentLength = contentTemplate.replace("{highlightCode}", "").length;
                 if (typeof error == "object" && !error.stack)
                         highlightCode = JSON.stringify(error, null, 2);
                 else if (error.stack)
@@ -88,7 +88,7 @@ module.exports = async function ({ api, threadModel, userModel, dashBoardModel, 
                 }
 
                 const jsonHook = {
-                        content: content.replace("{highlightCode}", highlightCode),
+                        content: contentTemplate.replace("{highlightCode}", highlightCode),
                         embeds: null,
                         attachments: []
                 };
@@ -127,3 +127,4 @@ module.exports = async function ({ api, threadModel, userModel, dashBoardModel, 
         }
 
 };
+
