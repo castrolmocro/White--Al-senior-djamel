@@ -105,7 +105,7 @@ module.exports = async function autoRelogin(api) {
         );
 
         resolve(true);
-        setTimeout(() => process.exit(0), RESTART_DELAY_MS);
+        setTimeout(() => process.exit(2), RESTART_DELAY_MS);
 
       } catch (saveErr) {
         log("error", `Failed to save new appstate: ${saveErr.message}`);
@@ -115,3 +115,4 @@ module.exports = async function autoRelogin(api) {
     });
   });
 };
+
