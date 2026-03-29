@@ -4,6 +4,7 @@ const path = require("path");
 
 let pingTimer = null;
 let saveTimer = null;
+let isSaving = false;
 
 function getRandomMs(minMinutes, maxMinutes) {
   const minMs = minMinutes * 60 * 1000;
@@ -35,15 +36,18 @@ async function doPing() {
     });
 
     global.utils.log.info("KEEP_ALIVE", "✅ Ping sent — account stays active");
-    global.lastMqttActivity = global.lastMqttActivity || Date.now();
   } catch (e) {
     global.utils.log.warn("KEEP_ALIVE", "⚠️ Ping failed: " + (e.message || e));
   }
 }
 
-async function doSaveCookies() {
+async function doSaveCookies(source) {
+  if (isSaving) return;
+  if (global.isRelogining) return;
+
+  isSaving = true;
   try {
-    const api = global.GoatBot.fcaApi;
+    const api = global.GoatBot?.fcaApi;
     if (!api) return;
 
     const appState = api.getAppState();
@@ -56,9 +60,11 @@ async function doSaveCookies() {
     if (current.trim() === newData.trim()) return;
 
     await fs.writeFile(accountPath, newData, "utf-8");
-    global.utils.log.info("KEEP_ALIVE", "💾 Cookies saved to account.txt");
+    global.utils.log.info("KEEP_ALIVE", `💾 Cookies saved to account.txt${source ? ` (${source})` : ""}`);
   } catch (e) {
     global.utils.log.warn("KEEP_ALIVE", "⚠️ Failed to save cookies: " + (e.message || e));
+  } finally {
+    isSaving = false;
   }
 }
 
@@ -75,9 +81,9 @@ function schedulePing() {
 
 function scheduleSave() {
   if (saveTimer) clearInterval(saveTimer);
-  const interval = 6 * 60 * 60 * 1000; // كل 6 ساعات
+  const interval = 2 * 60 * 60 * 1000;
   saveTimer = setInterval(async () => {
-    await doSaveCookies();
+    await doSaveCookies("scheduled");
   }, interval);
 }
 
@@ -87,7 +93,7 @@ module.exports = function startKeepAlive() {
 
   global.utils.log.info(
     "KEEP_ALIVE",
-    "🚀 Keep-alive started | Ping every 8–18 min | Cookies saved every 6h"
+    "🚀 Keep-alive started | Ping every 8–18 min | Cookies saved every 2h"
   );
 
   schedulePing();
@@ -99,4 +105,8 @@ module.exports.stop = function () {
   if (saveTimer) clearInterval(saveTimer);
   pingTimer = null;
   saveTimer = null;
+};
+
+module.exports.saveCookiesNow = function (source) {
+  return doSaveCookies(source || "manual");
 };
