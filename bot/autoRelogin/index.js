@@ -68,6 +68,7 @@ module.exports = async function autoRelogin(api) {
   }
 
   isAttempting = true;
+  global.isRelogining = true;
   lastAttempt  = now;
   retryCount++;
 
@@ -82,6 +83,7 @@ module.exports = async function autoRelogin(api) {
       isAttempting = false;
 
       if (err) {
+        global.isRelogining = false;
         const errMsg = err?.error || err?.message || String(err);
         log("error", `Re-login failed: ${errMsg}`);
         notifyAdmins(api,
@@ -108,6 +110,7 @@ module.exports = async function autoRelogin(api) {
         setTimeout(() => process.exit(2), RESTART_DELAY_MS);
 
       } catch (saveErr) {
+        global.isRelogining = false;
         log("error", `Failed to save new appstate: ${saveErr.message}`);
         notifyAdmins(api, `❌ Re-login succeeded but failed to save: ${saveErr.message}`);
         resolve(false);
@@ -115,4 +118,3 @@ module.exports = async function autoRelogin(api) {
     });
   });
 };
-
