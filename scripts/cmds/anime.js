@@ -4,66 +4,74 @@ const fs = require("fs-extra");
 const path = require("path");
 const { execSync, exec } = require("child_process");
 
-const ANILIST = "https://graphql.anilist.co";
+const JIKAN = "https://api.jikan.moe/v4";
 const TMP_DIR = path.join(process.cwd(), "scripts/cmds/tmp");
 const MAX_MB = 700;
 const UA = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", "Accept-Language": "ar,en;q=0.9" };
 
 fs.ensureDirSync(TMP_DIR);
 
-// ─── AniList API ─────────────────────────────────────────────────────────────
+// ─── Jikan API (MyAnimeList) ──────────────────────────────────────────────────
 
 async function searchAnime(query) {
-  const gql = `
-    query ($search: String) {
-      Page(perPage: 5) {
-        media(search: $search, type: ANIME, sort: SEARCH_MATCH) {
-          id title { romaji english arabic native }
-          description(asHtml: false) status episodes averageScore
-          genres season seasonYear format
-          coverImage { large }
-          relations {
-            edges {
-              relationType
-              node { id type format title { romaji english arabic } episodes season seasonYear status }
-            }
-          }
-        }
-      }
-    }
-  `;
-  const res = await axios.post(ANILIST, { query: gql, variables: { search: query } }, { timeout: 10000 });
-  return res.data.data.Page.media || [];
+  const res = await axios.get(`${JIKAN}/anime`, {
+    params: { q: query, limit: 5, sfw: true, type: "tv" },
+    timeout: 12000
+  });
+  return res.data.data || [];
+}
+
+async function getAnimeFull(malId) {
+  const res = await axios.get(`${JIKAN}/anime/${malId}/full`, { timeout: 12000 });
+  return res.data.data;
 }
 
 function getTitle(m) {
-  return (m.title?.arabic || m.title?.english || m.title?.romaji || m.title?.native || "Unknown").trim();
+  return (m.title_english || m.title || m.title_japanese || "Unknown").trim();
 }
+
 function getStatus(s) {
-  return { FINISHED: "منتهى ✅", RELEASING: "يُعرض الآن 🟢", NOT_YET_RELEASED: "قريباً 🔜", CANCELLED: "ملغى ❌", HIATUS: "متوقف ⏸" }[s] || (s || "");
+  if (!s) return "";
+  if (s.includes("Finished") || s === "FINISHED") return "منتهى ✅";
+  if (s.includes("Airing") || s.includes("Currently") || s === "RELEASING") return "يُعرض الآن 🟢";
+  if (s.includes("Not yet") || s === "NOT_YET_RELEASED") return "قريباً 🔜";
+  if (s === "CANCELLED") return "ملغى ❌";
+  return s;
 }
+
 function getSeason(s) {
-  return { WINTER: "شتاء ❄️", SPRING: "ربيع 🌸", SUMMER: "صيف ☀️", FALL: "خريف 🍂" }[s] || (s || "");
+  return { winter: "شتاء ❄️", spring: "ربيع 🌸", summer: "صيف ☀️", fall: "خريف 🍂", WINTER: "شتاء ❄️", SPRING: "ربيع 🌸", SUMMER: "صيف ☀️", FALL: "خريف 🍂" }[s] || (s || "");
 }
 
 function buildSeasons(media) {
   const seen = new Set();
   const list = [];
-  const add = (m) => {
-    if (seen.has(m.id)) return;
-    seen.add(m.id);
-    list.push({ id: m.id, title: getTitle(m), episodes: m.episodes || 0, season: m.season, seasonYear: m.seasonYear, status: m.status, format: m.format });
+
+  const add = (entry) => {
+    if (seen.has(entry.mal_id || entry.id)) return;
+    seen.add(entry.mal_id || entry.id);
+    list.push({
+      id: entry.mal_id || entry.id,
+      title: entry.title_english || entry.title || entry.name || getTitle(entry),
+      episodes: entry.episodes || 0,
+      season: entry.season,
+      seasonYear: entry.year || entry.seasonYear,
+      status: entry.status,
+      format: entry.type || entry.format
+    });
   };
+
   add(media);
-  for (const e of (media.relations?.edges || [])) {
-    if ((e.relationType === "SEQUEL" || e.relationType === "PREQUEL") &&
-        e.node.type === "ANIME" && ["TV", "TV_SHORT", "OVA", "MOVIE"].includes(e.node.format)) add(e.node);
+
+  for (const rel of (media.relations || [])) {
+    if (rel.relation === "Sequel" || rel.relation === "Prequel") {
+      for (const e of (rel.entry || [])) {
+        if (e.type === "anime") add(e);
+      }
+    }
   }
-  list.sort((a, b) => {
-    const dy = (a.seasonYear || 9999) - (b.seasonYear || 9999);
-    if (dy !== 0) return dy;
-    return ["WINTER", "SPRING", "SUMMER", "FALL"].indexOf(a.season) - ["WINTER", "SPRING", "SUMMER", "FALL"].indexOf(b.season);
-  });
+
+  list.sort((a, b) => (a.seasonYear || 9999) - (b.seasonYear || 9999));
   list.forEach((s, i) => { s.label = `الموسم ${i + 1}`; });
   return list;
 }
@@ -362,7 +370,7 @@ module.exports = {
       let body = `🔍 نتائج: "${query}"\n━━━━━━━━━━━━━━━━━━\n\n`;
       results.forEach((a, i) => {
         body += `${i + 1}️⃣ ${getTitle(a)}\n`;
-        body += `   📺 ${a.episodes || "?"} حلقة | ${getStatus(a.status)} | ⭐${a.averageScore || "?"}/100\n\n`;
+        body += `   📺 ${a.episodes || "?"} حلقة | ${getStatus(a.status)} | ⭐${a.score || "?"}/10\n\n`;
       });
       body += "↩️ رد برقم الأنمي.";
       api.setMessageReaction("✅", messageID, () => {}, true);
@@ -385,16 +393,26 @@ module.exports = {
     if (state === "select_anime") {
       const n = parseInt(event.body);
       if (isNaN(n) || n < 1 || n > Reply.results.length) return api.sendMessage(`❌ اختر 1-${Reply.results.length}.`, threadID, messageID);
-      const anime = Reply.results[n - 1];
+      const basicAnime = Reply.results[n - 1];
+
+      api.setMessageReaction("⏳", messageID, () => {}, true);
+
+      // Fetch full details including relations
+      let anime = basicAnime;
+      try { anime = await getAnimeFull(basicAnime.mal_id); } catch (_) {}
+
       const title = getTitle(anime);
-      const desc = (anime.description || "").replace(/<br\s*\/?>/gi, "\n").replace(/<[^>]+>/g, "").substring(0, 300);
+      const desc = (anime.synopsis || "").replace(/<[^>]+>/g, "").substring(0, 300);
+      const genreNames = (anime.genres || []).map(g => g.name).join(", ");
       const seasons = buildSeasons(anime);
+
+      api.setMessageReaction("✅", messageID, () => {}, true);
 
       let body = `🎌 ${title}\n━━━━━━━━━━━━━━━━━━\n`;
       body += `📺 الحلقات: ${anime.episodes || "?"} | ${getStatus(anime.status)}\n`;
-      body += `⭐ التقييم: ${anime.averageScore || "؟"}/100\n`;
-      body += `📅 ${getSeason(anime.season)} ${anime.seasonYear || ""}\n`;
-      body += `🎭 ${(anime.genres || []).join(", ")}\n\n`;
+      body += `⭐ التقييم: ${anime.score || "؟"}/10\n`;
+      body += `📅 ${getSeason(anime.season)} ${anime.year || ""}\n`;
+      body += `🎭 ${genreNames}\n\n`;
       if (desc) body += `📝 ${desc}...\n\n`;
 
       if (seasons.length > 1) {
@@ -414,7 +432,7 @@ module.exports = {
           commandName, author: event.senderID,
           state: seasons.length > 1 ? "select_season" : "select_episode",
           seasons, animeTitle: title,
-          totalEpisodes: seasons.length === 1 ? (anime.episodes || 0) : 0,
+          totalEpisodes: seasons.length === 1 ? (anime.episodes || basicAnime.episodes || 0) : 0,
           seasonTitle: getTitle(anime),
           messageID: info.messageID
         });
