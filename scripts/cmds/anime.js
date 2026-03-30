@@ -76,185 +76,62 @@ function buildSeasons(media) {
   return list;
 }
 
-// ─── AniméSlayer Scraper ──────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-async function slayerSearch(query) {
-  try {
-    const url = `https://animeslayer.net/?search_param=animes&s=${encodeURIComponent(query)}`;
-    const res = await axios.get(url, { headers: UA, timeout: 15000 });
-    const $ = cheerio.load(res.data);
-    const results = [];
-    $("article, .anime-card, .post, .blog-card, .AnimeCard").each((i, el) => {
-      const a = $(el).find("a[href*='animeslayer']").first();
-      const title = ($(el).find("h2, h3, .title, .post-title, .AnimeTitle").first().text() || a.attr("title") || "").trim();
-      const link = a.attr("href") || $(el).find("a").first().attr("href");
-      if (title && link && link.includes("animeslayer")) results.push({ title, link });
-    });
-    return results.slice(0, 5);
-  } catch (_) { return []; }
+function titleToSlug(title) {
+  return (title || "")
+    .toLowerCase()
+    .replace(/[:\u2019\u2018'`]/g, "")
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-");
 }
 
-async function slayerGetEpisodeUrl(animePageUrl, epNum) {
-  try {
-    const res = await axios.get(animePageUrl, { headers: UA, timeout: 15000 });
-    const $ = cheerio.load(res.data);
-    let epUrl = null;
-    $("a[href]").each((i, el) => {
-      const href = $(el).attr("href") || "";
-      const text = $(el).text().trim();
-      if (epUrl) return;
-      const epPatterns = [
-        new RegExp(`episode[\\-_\\s]?0*${epNum}(?:[^\\d]|$)`, "i"),
-        new RegExp(`ep[\\-_\\s]?0*${epNum}(?:[^\\d]|$)`, "i"),
-        new RegExp(`حلقة[\\s\\-]?0*${epNum}(?:[^\\d]|$)`)
-      ];
-      if (epPatterns.some(p => p.test(href) || p.test(text))) {
-        epUrl = href;
-      }
-    });
-    return epUrl;
-  } catch (_) { return null; }
-}
-
-async function slayerGetDownloadLinks(epUrl) {
-  try {
-    const res = await axios.get(epUrl, { headers: UA, timeout: 15000 });
-    const $ = cheerio.load(res.data);
-    const links = [];
-
-    // Direct MP4 links
-    $("a[href]").each((i, el) => {
-      const href = $(el).attr("href") || "";
-      const text = $(el).text().trim();
-      if (href.match(/\.(mp4|mkv|avi)(\?|$)/i) || text.match(/تحميل|download/i)) {
-        const quality = text.match(/1080|720|480|360/) ? text.match(/1080|720|480|360/)[0] : "720";
-        links.push({ url: href, quality, type: "direct" });
-      }
-    });
-
-    // Embedded players (m3u8 sources)
-    const html = res.data;
-    const m3u8Matches = html.match(/https?:\/\/[^\s"']+\.m3u8[^\s"']*/g) || [];
-    for (const u of m3u8Matches) links.push({ url: u, quality: "auto", type: "hls" });
-
-    return links;
-  } catch (_) { return []; }
-}
-
-// ─── animelek.me Scraper ──────────────────────────────────────────────────────
-
-async function animelek_search(query) {
-  try {
-    const url = `https://animelek.me/?s=${encodeURIComponent(query)}`;
-    const res = await axios.get(url, { headers: UA, timeout: 15000 });
-    const $ = cheerio.load(res.data);
-    const results = [];
-    $(".anime-card, article, .item").each((i, el) => {
-      const a = $(el).find("a").first();
-      const title = ($(el).find("h2, h3, .title").first().text() || a.attr("title") || "").trim();
-      const link = a.attr("href");
-      if (title && link) results.push({ title, link });
-    });
-    return results.slice(0, 5);
-  } catch (_) { return []; }
-}
-
-async function animelek_episode(animeUrl, epNum) {
-  try {
-    const res = await axios.get(animeUrl, { headers: UA, timeout: 15000 });
-    const $ = cheerio.load(res.data);
-    let epUrl = null;
-    $("a[href]").each((i, el) => {
-      const href = $(el).attr("href") || "";
-      const text = $(el).text().trim();
-      if (epUrl) return;
-      if (new RegExp(`(episode|ep)[\\-_]?0*${epNum}(?:[^\\d]|$)`, "i").test(href) ||
-          new RegExp(`حلقة[\\s\\-]?0*${epNum}(?:[^\\d]|$)`).test(text)) {
-        epUrl = href;
-      }
-    });
-    if (!epUrl) return [];
-    const epRes = await axios.get(epUrl, { headers: UA, timeout: 15000 });
-    const $ep = cheerio.load(epRes.data);
-    const links = [];
-    $ep("a[href]").each((i, el) => {
-      const href = $ep(el).attr("href") || "";
-      const text = $ep(el).text().trim();
-      if (href.match(/\.(mp4|mkv)(\?|$)/i) || text.match(/تحميل|download/i)) {
-        links.push({ url: href, quality: (text.match(/1080|720|480/) || ["720"])[0], type: "direct" });
-      }
-    });
-    return links;
-  } catch (_) { return []; }
-}
-
-// ─── aniwatch API (fallback with Arabic subs) ─────────────────────────────────
-
-const ANIWATCH_INSTANCES = [
-  "https://aniwatch-api-nine.vercel.app",
-  "https://aniwatch-api-dusky.vercel.app"
-];
-
-async function aniwatchSearch(query) {
-  for (const base of ANIWATCH_INSTANCES) {
-    try {
-      const res = await axios.get(`${base}/api/v2/hianime/search`, {
-        params: { q: query, page: 1 },
-        timeout: 10000
-      });
-      return { base, results: res.data.data?.animes || [] };
-    } catch (_) { continue; }
+function getSlugsFromAnime(anime) {
+  const slugs = new Set();
+  const candidates = [
+    anime.title_english,
+    anime.title,
+    anime.title_japanese
+  ].filter(Boolean);
+  for (const t of candidates) {
+    const s = titleToSlug(t);
+    if (s) slugs.add(s);
   }
-  return { base: null, results: [] };
-}
-
-async function aniwatchEpisodes(base, animeId) {
-  try {
-    const res = await axios.get(`${base}/api/v2/hianime/anime/${animeId}/episodes`, { timeout: 10000 });
-    return res.data.data?.episodes || [];
-  } catch (_) { return []; }
-}
-
-async function aniwatchSources(base, episodeId) {
-  for (const cat of ["sub", "dub"]) {
-    for (const server of ["vidstreaming", "vidcloud", "streamsb"]) {
-      try {
-        const res = await axios.get(`${base}/api/v2/hianime/episode/sources`, {
-          params: { animeEpisodeId: episodeId, server, category: cat },
-          timeout: 12000
-        });
-        const sources = res.data.data?.sources || [];
-        const subs = res.data.data?.subtitles || [];
-        if (sources.length) return { sources, subtitles: subs };
-      } catch (_) { continue; }
-    }
-  }
-  return null;
+  return [...slugs];
 }
 
 // ─── Downloader ───────────────────────────────────────────────────────────────
 
-function downloadWithFFmpeg(videoUrl, subUrl, outFile) {
+function downloadWithFFmpeg(videoUrl, referer, outFile) {
   return new Promise((resolve, reject) => {
-    let cmd;
-    if (subUrl) {
-      const subFile = outFile.replace(".mp4", ".vtt");
-      cmd = `ffmpeg -y -i "${videoUrl}" -i "${subUrl}" -map 0:v -map 0:a -map 1:0 -c:v copy -c:a aac -c:s mov_text -metadata:s:s:0 language=ara "${outFile}" 2>&1`;
-    } else {
-      cmd = `ffmpeg -y -i "${videoUrl}" -c:v copy -c:a aac "${outFile}" 2>&1`;
-    }
-    exec(cmd, { timeout: 600000 }, (err, stdout) => {
-      if (err) return reject(new Error(`ffmpeg error: ${err.message}`));
+    const ref = referer || "https://animelek.vip/";
+    const cmd = `ffmpeg -y -headers "Referer: ${ref}" -i "${videoUrl}" -c:v copy -c:a aac "${outFile}" 2>&1`;
+    exec(cmd, { timeout: 720000 }, (err) => {
+      if (err) return reject(new Error(err.message));
       resolve(outFile);
     });
   });
 }
 
-async function downloadDirect(url, outFile) {
+function downloadWithFFmpegAndSub(videoUrl, subUrl, referer, outFile) {
+  return new Promise((resolve, reject) => {
+    const ref = referer || "https://hianime.to/";
+    const cmd = `ffmpeg -y -headers "Referer: ${ref}" -i "${videoUrl}" -i "${subUrl}" -map 0:v -map 0:a -map 1:0 -c:v copy -c:a aac -c:s mov_text -metadata:s:s:0 language=ara "${outFile}" 2>&1`;
+    exec(cmd, { timeout: 720000 }, (err) => {
+      if (err) return reject(new Error(err.message));
+      resolve(outFile);
+    });
+  });
+}
+
+async function downloadDirect(url, outFile, referer) {
   const res = await axios.get(url, {
     responseType: "stream",
-    headers: { ...UA, "Referer": "https://animeslayer.net/" },
-    timeout: 600000
+    headers: { ...UA, "Referer": referer || "https://animelek.vip/" },
+    timeout: 720000,
+    maxContentLength: MAX_MB * 1024 * 1024
   });
   const writer = fs.createWriteStream(outFile);
   res.data.pipe(writer);
@@ -264,77 +141,295 @@ async function downloadDirect(url, outFile) {
   });
 }
 
-async function fetchEpisode(animeTitle, epNum, seasonTitle) {
-  const searchTitle = seasonTitle || animeTitle;
+function checkFile(outFile) {
+  if (!fs.existsSync(outFile)) return null;
+  const mb = fs.statSync(outFile).size / (1024 * 1024);
+  return mb > 1 && mb <= MAX_MB ? mb : null;
+}
+
+// ─── Hoster resolver ─────────────────────────────────────────────────────────
+// Tries to download from any file hosting link
+
+const SKIP_HOSTERS = ["mega.nz", "drive.google.com", "4shared.com", "meganz", "mega.co.nz"];
+
+async function resolveAndDownload(url, outFile, referer) {
+  if (!url || !url.startsWith("http")) return null;
+  if (SKIP_HOSTERS.some(h => url.includes(h))) return null;
+
+  const ref = referer || "https://animelek.vip/";
+
+  // ── Direct m3u8/mp4 URL → ffmpeg or stream ───────────────────────────────
+  if (url.includes(".m3u8")) {
+    try {
+      await downloadWithFFmpeg(url, ref, outFile);
+      return checkFile(outFile);
+    } catch (_) { return null; }
+  }
+
+  // ── mp4upload: parse embed for jwplayer source ────────────────────────────
+  if (url.includes("mp4upload.com")) {
+    try {
+      const embedId = url.match(/embed-([a-z0-9]+)\.html/)?.[1] || url.match(/mp4upload\.com\/([a-z0-9]+)/)?.[1];
+      if (embedId) {
+        const r = await axios.get(`https://www.mp4upload.com/embed-${embedId}.html`, {
+          headers: { ...UA, Referer: ref }, timeout: 12000
+        });
+        // jwplayer file source
+        const src = r.data.match(/"file"\s*:\s*"(https?:\/\/[^"]+\.mp4[^"]*)"/)?.[1] ||
+                    r.data.match(/src\s*:\s*["'](https?:\/\/[^"']+\.mp4[^"']*)/)?.[1];
+        if (src) {
+          await downloadDirect(src, outFile, `https://www.mp4upload.com/`);
+          return checkFile(outFile);
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  // ── HEAD check → direct video response ───────────────────────────────────
+  try {
+    const head = await axios.head(url, {
+      headers: { ...UA, Referer: ref }, timeout: 10000, maxRedirects: 6
+    });
+    const ct = (head.headers["content-type"] || "").toLowerCase();
+    if (ct.includes("video") || ct.includes("octet-stream") || url.match(/\.(mp4|mkv|avi)(\?|$)/i)) {
+      await downloadDirect(url, outFile, ref);
+      return checkFile(outFile);
+    }
+  } catch (_) {}
+
+  return null;
+}
+
+// ─── Source 1: animelek.vip (Primary – confirmed working) ────────────────────
+// Episode URL pattern: /episode/{slug}-{N}-الحلقة/
+// Download links: #downloads li.watch a[href]
+
+async function tryAnimelek(slugs, epNum, outFile) {
+  const epAr = "%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9"; // الحلقة URL-encoded
+  const ref = "https://animelek.vip/";
+
+  for (const slug of slugs) {
+    // Try episode URL directly
+    const epUrl = `https://animelek.vip/episode/${slug}-${epNum}-${epAr}/`;
+    try {
+      const r = await axios.get(epUrl, { headers: UA, timeout: 15000 });
+      if (r.status !== 200) continue;
+
+      const $ = cheerio.load(r.data);
+      // Collect all external download links from the page
+      const links = [];
+      $("a[href]").each((_, el) => {
+        const h = $(el).attr("href") || "";
+        const t = $(el).text().toLowerCase();
+        if (!h.startsWith("http") || h.includes("animelek")) return;
+        // Prioritise HD quality
+        const q = (t.match(/fhd|1080/) ? 4 : t.match(/hd|720/) ? 3 : t.match(/sd|480/) ? 2 : 1);
+        links.push({ url: h, q });
+      });
+      links.sort((a, b) => b.q - a.q);
+
+      for (const { url } of links) {
+        try {
+          if (fs.existsSync(outFile)) fs.unlinkSync(outFile);
+          const mb = await resolveAndDownload(url, outFile, ref);
+          if (mb) return { filePath: outFile, sizeMB: mb, source: "AnimeLeK 🎌 (مترجم عربي)" };
+        } catch (_) { continue; }
+      }
+    } catch (_) { continue; }
+  }
+  return null;
+}
+
+// ─── Source 2: shahiid-anime.net (Secondary – confirmed working) ─────────────
+// Navigation: search → /series/ → /seasons/ → episode list → /episodes/ + /?download=
+
+async function tryShahiid(searchTitles, epNum, outFile) {
+  const ref = "https://shahiid-anime.net/";
+
+  for (const query of searchTitles) {
+    try {
+      // Step 1: Search
+      const sRes = await axios.get(`https://shahiid-anime.net/?s=${encodeURIComponent(query)}`, {
+        headers: UA, timeout: 15000
+      });
+      const $s = cheerio.load(sRes.data);
+
+      // Step 2: Find /seasons/ URL (direct season page)
+      let seasonsUrl = null;
+      $s("a[href*='/seasons/']").each((_, el) => {
+        if (!seasonsUrl) seasonsUrl = $s(el).attr("href");
+      });
+      if (!seasonsUrl) continue;
+
+      // Step 3: Get season page – list episodes
+      const aRes = await axios.get(seasonsUrl, { headers: UA, timeout: 15000 });
+      const $a = cheerio.load(aRes.data);
+
+      // Episode padding (shahiid uses 01, 02...)
+      const padded = String(epNum).padStart(2, "0");
+
+      // Step 4: Find episode link + download ID
+      let epPageUrl = null;
+      let downloadId = null;
+
+      $a("a[href]").each((_, el) => {
+        const h = $a(el).attr("href") || "";
+        const t = $a(el).text().trim();
+        // Episode page: /episodes/anime-title-الحلقة-{XX}-...
+        if (!epPageUrl && h.includes("/episodes/") &&
+            (h.includes(`-%d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-${padded}`) ||
+             h.includes(`الحلقة-${padded}`) ||
+             new RegExp(`[^\\d]0*${epNum}[^\\d]`).test(h))) {
+          epPageUrl = h;
+        }
+        // Download link: /?download=ID shown next to episode
+        if (!downloadId && h.includes("?download=") &&
+            (t.includes(padded) || t.includes(String(epNum)))) {
+          downloadId = h.split("?download=")[1];
+        }
+      });
+
+      // If no specific match, try positional (episode N = Nth item)
+      if (!epPageUrl) {
+        const epLinks = [];
+        $a("a[href*='/episodes/']").each((_, el) => epLinks.push($a(el).attr("href")));
+        const unique = [...new Set(epLinks)];
+        if (epNum <= unique.length) epPageUrl = unique[epNum - 1];
+      }
+      if (!downloadId) {
+        const dlLinks = [];
+        $a("a[href*='?download=']").each((_, el) => dlLinks.push($a(el).attr("href").split("?download=")[1]));
+        const unique = [...new Set(dlLinks)];
+        if (epNum <= unique.length) downloadId = unique[epNum - 1];
+      }
+
+      // Step 5a: Try direct download endpoint
+      if (downloadId) {
+        const dlUrl = `https://shahiid-anime.net/?download=${downloadId}`;
+        try {
+          const mb = await resolveAndDownload(dlUrl, outFile, ref);
+          if (mb) return { filePath: outFile, sizeMB: mb, source: "Shahiid Anime 📺 (عربي)" };
+        } catch (_) {}
+      }
+
+      // Step 5b: Navigate episode page and collect stream/download links
+      if (epPageUrl) {
+        try {
+          const eRes = await axios.get(epPageUrl, { headers: UA, timeout: 15000 });
+          const $e = cheerio.load(eRes.data);
+          const links = [];
+          // m3u8 streams in source
+          const m3u8s = (eRes.data.match(/https?:\/\/[^\s"'\\]+\.m3u8[^\s"'\\]*/g) || []);
+          for (const u of m3u8s) links.push({ url: u, q: 10 });
+          // mp4 download links
+          $e("a[href]").each((_, el) => {
+            const h = $e(el).attr("href") || "";
+            const t = $e(el).text().toLowerCase();
+            if (!h.startsWith("http") || h.includes("shahiid")) return;
+            const q = t.includes("1080") ? 4 : t.includes("720") ? 3 : t.includes("480") ? 2 : 1;
+            links.push({ url: h, q });
+          });
+          links.sort((a, b) => b.q - a.q);
+          for (const { url } of links) {
+            try {
+              if (fs.existsSync(outFile)) fs.unlinkSync(outFile);
+              const mb = await resolveAndDownload(url, outFile, ref);
+              if (mb) return { filePath: outFile, sizeMB: mb, source: "Shahiid Anime 📺 (عربي)" };
+            } catch (_) { continue; }
+          }
+        } catch (_) {}
+      }
+    } catch (_) { continue; }
+  }
+  return null;
+}
+
+// ─── Source 3: animelek search fallback ──────────────────────────────────────
+// When title slug guessing fails, search the site to find correct slug
+
+async function tryAnimelekSearch(searchTitles, epNum, outFile) {
+  const epAr = "%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9";
+  const ref = "https://animelek.vip/";
+
+  for (const query of searchTitles) {
+    try {
+      const r = await axios.get(`https://animelek.vip/?s=${encodeURIComponent(query)}`, {
+        headers: UA, timeout: 15000
+      });
+      const $ = cheerio.load(r.data);
+      const slugs = new Set();
+      $("a[href*='/anime/']").each((_, el) => {
+        const h = $(el).attr("href") || "";
+        const slug = h.match(/\/anime\/([^/]+)\/?$/)?.[1];
+        if (slug) slugs.add(slug);
+      });
+      if (!slugs.size) continue;
+
+      for (const slug of slugs) {
+        const epUrl = `https://animelek.vip/episode/${slug}-${epNum}-${epAr}/`;
+        try {
+          const er = await axios.get(epUrl, { headers: UA, timeout: 12000 });
+          if (er.status !== 200) continue;
+          const $e = cheerio.load(er.data);
+          const links = [];
+          $e("a[href]").each((_, el) => {
+            const h = $e(el).attr("href") || "";
+            const t = $e(el).text().toLowerCase();
+            if (!h.startsWith("http") || h.includes("animelek")) return;
+            const q = t.includes("fhd") || t.includes("1080") ? 4 : t.includes("hd") || t.includes("720") ? 3 : 1;
+            links.push({ url: h, q });
+          });
+          links.sort((a, b) => b.q - a.q);
+          for (const { url } of links) {
+            try {
+              if (fs.existsSync(outFile)) fs.unlinkSync(outFile);
+              const mb = await resolveAndDownload(url, outFile, ref);
+              if (mb) return { filePath: outFile, sizeMB: mb, source: "AnimeLeK 🔍 (بحث)" };
+            } catch (_) { continue; }
+          }
+        } catch (_) { continue; }
+      }
+    } catch (_) { continue; }
+  }
+  return null;
+}
+
+// ─── Main fetchEpisode ────────────────────────────────────────────────────────
+
+async function fetchEpisode(animeTitle, epNum, seasonTitle, animeMeta) {
+  const titles = [seasonTitle, animeTitle].filter(Boolean);
   const outFile = path.join(TMP_DIR, `anime_${Date.now()}_ep${epNum}.mp4`);
 
-  // ── 1. AniméSlayer ────────────────────────────────────────────────────────
-  try {
-    const slayerResults = await slayerSearch(searchTitle);
-    if (slayerResults.length > 0) {
-      const epUrl = await slayerGetEpisodeUrl(slayerResults[0].link, epNum);
-      if (epUrl) {
-        const links = await slayerGetDownloadLinks(epUrl);
-        const best = links.sort((a, b) => {
-          const qOrder = { "1080": 3, "720": 2, "480": 1 };
-          return (qOrder[b.quality] || 0) - (qOrder[a.quality] || 0);
-        })[0];
-        if (best) {
-          if (best.type === "direct") {
-            await downloadDirect(best.url, outFile);
-          } else {
-            await downloadWithFFmpeg(best.url, null, outFile);
-          }
-          if (fs.existsSync(outFile)) {
-            const mb = fs.statSync(outFile).size / (1024 * 1024);
-            if (mb > 1 && mb <= MAX_MB) return { filePath: outFile, sizeMB: mb, source: "AniméSlayer 🗡️" };
-          }
-        }
-      }
+  // Build slug list from all known titles
+  const slugCandidates = [];
+  for (const t of titles) {
+    const s = titleToSlug(t);
+    if (s) slugCandidates.push(s);
+  }
+  // Also add slugs from MAL metadata if available
+  if (animeMeta) {
+    for (const s of getSlugsFromAnime(animeMeta)) {
+      if (!slugCandidates.includes(s)) slugCandidates.push(s);
     }
-  } catch (_) {}
+  }
 
-  // ── 2. animelek.me ────────────────────────────────────────────────────────
-  try {
-    const anilekResults = await animelek_search(searchTitle);
-    if (anilekResults.length > 0) {
-      const links = await animelek_episode(anilekResults[0].link, epNum);
-      const best = links[0];
-      if (best) {
-        if (best.type === "direct") await downloadDirect(best.url, outFile);
-        else await downloadWithFFmpeg(best.url, null, outFile);
-        if (fs.existsSync(outFile)) {
-          const mb = fs.statSync(outFile).size / (1024 * 1024);
-          if (mb > 1 && mb <= MAX_MB) return { filePath: outFile, sizeMB: mb, source: "AnimeLeK 📺" };
-        }
-      }
-    }
-  } catch (_) {}
+  const sources = [
+    // Source 1: animelek.vip direct by slug
+    () => tryAnimelek(slugCandidates, epNum, outFile),
+    // Source 2: shahiid-anime.net via search
+    () => tryShahiid(titles, epNum, outFile),
+    // Source 3: animelek.vip via search (slug guessing fallback)
+    () => tryAnimelekSearch(titles, epNum, outFile)
+  ];
 
-  // ── 3. aniwatch (Arabic subs + ffmpeg) ────────────────────────────────────
-  try {
-    const { base, results } = await aniwatchSearch(searchTitle);
-    if (base && results.length > 0) {
-      const animeId = results[0].id;
-      const episodes = await aniwatchEpisodes(base, animeId);
-      const targetEp = episodes.find(e => String(e.number) === String(epNum));
-      if (targetEp) {
-        const data = await aniwatchSources(base, targetEp.episodeId);
-        if (data) {
-          const hlsSource = data.sources.find(s => s.type === "hls") || data.sources[0];
-          const arabicSub = data.subtitles.find(s => s.lang?.toLowerCase().includes("arabic") || s.lang?.toLowerCase().includes("arab"));
-          const subUrl = arabicSub?.url || null;
-          if (hlsSource) {
-            await downloadWithFFmpeg(hlsSource.url, subUrl, outFile);
-            if (fs.existsSync(outFile)) {
-              const mb = fs.statSync(outFile).size / (1024 * 1024);
-              if (mb > 1 && mb <= MAX_MB) return { filePath: outFile, sizeMB: mb, source: "aniwatch 🎌 (ترجمة عربية)" };
-            }
-          }
-        }
-      }
-    }
-  } catch (_) {}
+  for (const src of sources) {
+    try {
+      if (fs.existsSync(outFile)) fs.unlinkSync(outFile);
+      const result = await src();
+      if (result) return result;
+    } catch (_) { continue; }
+  }
 
   return null;
 }
@@ -431,7 +526,7 @@ module.exports = {
         global.GoatBot.onReply.set(info.messageID, {
           commandName, author: event.senderID,
           state: seasons.length > 1 ? "select_season" : "select_episode",
-          seasons, animeTitle: title,
+          seasons, animeTitle: title, animeMeta: anime,
           totalEpisodes: seasons.length === 1 ? (anime.episodes || basicAnime.episodes || 0) : 0,
           seasonTitle: getTitle(anime),
           messageID: info.messageID
@@ -465,7 +560,7 @@ module.exports = {
         if (!info) return;
         global.GoatBot.onReply.set(info.messageID, {
           commandName, author: event.senderID, state: "select_episode",
-          seasons, animeTitle, season, seasonTitle: season.title,
+          seasons, animeTitle, animeMeta: Reply.animeMeta, season, seasonTitle: season.title,
           seasonIdx: idx, totalEpisodes: eps, messageID: info.messageID
         });
       });
@@ -487,12 +582,12 @@ module.exports = {
       const seasonLabel = season?.label || "الموسم 1";
       let waitMsgID = null;
       api.sendMessage(
-        `⏳ جاري البحث عن الحلقة ${epNum} من ${animeTitle} — ${seasonLabel}\n🔍 مصادر: AniméSlayer ← animelek ← aniwatch`,
+        `⏳ جاري البحث عن الحلقة ${epNum} من ${animeTitle} — ${seasonLabel}\n🔍 مصادر: animelek ← shahiid-anime ← بحث...`,
         threadID, (e, info) => { if (info) waitMsgID = info.messageID; }
       );
 
       try {
-        const result = await fetchEpisode(animeTitle, epNum, seasonTitle);
+        const result = await fetchEpisode(animeTitle, epNum, seasonTitle, Reply.animeMeta);
         if (waitMsgID) try { api.unsendMessage(waitMsgID); } catch (_) {}
 
         if (!result) {
@@ -526,7 +621,7 @@ module.exports = {
               if (!navInfo) return;
               global.GoatBot.onReply.set(navInfo.messageID, {
                 commandName, author: event.senderID, state: "navigate_episode",
-                animeTitle, season, seasons, seasonIdx, seasonTitle,
+                animeTitle, animeMeta: Reply.animeMeta, season, seasons, seasonIdx, seasonTitle,
                 totalEpisodes, currentEp: epNum, messageID: navInfo.messageID
               });
             });
