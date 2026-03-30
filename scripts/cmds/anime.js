@@ -165,25 +165,96 @@ function checkFile(outFile) {
 // ─── Parallel HEAD scan ───────────────────────────────────────────────────────
 // Checks all links simultaneously to find the best accessible one fast
 
-const SKIP_HOSTERS = ["mega.nz", "drive.google.com", "4shared.com", "meganz", "mega.co.nz"];
+// Dead or auth-required hosters — skip entirely to save time
+const SKIP_HOSTERS = [
+  "mega.nz", "drive.google.com", "4shared.com", "meganz", "mega.co.nz",
+  "upbam.org", "upbaam.com",             // always 404
+  "file-upload.com", "file-upload.org",  // always 404
+  "solidfiles.com",                      // DNS failure on Railway
+  "letsupload.io", "letsupload.co",      // returns HTML/invalid
+  "twitter.com", "instagram.com",        // social links
+  "youtube.com", "youtu.be",             // social links
+  "myanimelist.net", "facebook.com",     // info sites
+  "racaty.net"                           // returns HTML
+];
 
-// sortedLinks: filters skipped hosters, detects type, sorts by quality
-// Does NOT block on HEAD checks — lets downloadBestLink try them all
+// ─── Specialized hoster extractors ───────────────────────────────────────────
+
+async function extractDoodstream(url, ref) {
+  try {
+    const id = url.match(/\/(?:d|e)\/([a-z0-9]+)/i)?.[1];
+    if (!id) return null;
+    const embedUrl = `https://doodstream.com/e/${id}`;
+    console.log(`[anime] 🎬 doodstream embed: ${embedUrl}`);
+    const r = await axios.get(embedUrl, { headers: { ...UA, Referer: ref }, timeout: 12000 });
+    const passPath = r.data.match(/\/pass_md5\/[^'"?\s]+/)?.[0];
+    if (!passPath) { console.log(`[anime] ⚠️ doodstream: لم أجد pass_md5`); return null; }
+    const passRes = await axios.get(`https://doodstream.com${passPath}`, {
+      headers: { ...UA, Referer: embedUrl }, timeout: 10000
+    });
+    const base = passRes.data?.toString?.().trim();
+    if (!base || !base.startsWith("http")) { console.log(`[anime] ⚠️ doodstream: invalid pass`); return null; }
+    const token = passPath.split("/").pop();
+    const rand = Math.random().toString(36).slice(2, 14);
+    const final = `${base}${rand}?token=${token}&expiry=${Date.now()}`;
+    console.log(`[anime] ✅ doodstream → ${final.slice(0, 80)}`);
+    return { url: final, type: "direct" };
+  } catch (e) { console.log(`[anime] ❌ doodstream: ${e.message?.slice(0, 50)}`); return null; }
+}
+
+async function extractVoe(url, ref) {
+  try {
+    console.log(`[anime] 🎬 voe.sx: ${url.slice(0, 60)}`);
+    const r = await axios.get(url, { headers: { ...UA, Referer: ref }, timeout: 12000 });
+    const hls = r.data.match(/'hls'\s*:\s*'(https?:\/\/[^']+)'/)?.[1]
+             || r.data.match(/"hls"\s*:\s*"(https?:\/\/[^"]+)"/)?.[1]
+             || r.data.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/)?.[0];
+    if (hls) { console.log(`[anime] ✅ voe HLS → ${hls.slice(0, 80)}`); return { url: hls, type: "hls" }; }
+    const mp4 = r.data.match(/'mp4'\s*:\s*'(https?:\/\/[^']+)'/)?.[1]
+             || r.data.match(/"mp4"\s*:\s*"(https?:\/\/[^"]+\.mp4[^"]*)"/)?.[1];
+    if (mp4) { console.log(`[anime] ✅ voe mp4 → ${mp4.slice(0, 80)}`); return { url: mp4, type: "direct" }; }
+    console.log(`[anime] ⚠️ voe.sx: لم أجد stream`);
+    return null;
+  } catch (e) { console.log(`[anime] ❌ voe: ${e.message?.slice(0, 50)}`); return null; }
+}
+
+async function extractMp4upload(embedId, ref) {
+  try {
+    console.log(`[anime] 🎬 mp4upload embed: ${embedId}`);
+    const r = await axios.get(`https://www.mp4upload.com/embed-${embedId}.html`, {
+      headers: { ...UA, Referer: ref }, timeout: 15000
+    });
+    // Multiple patterns — mp4upload URL doesn't always end in .mp4
+    const src = r.data.match(/"file"\s*:\s*"(https?:\/\/[^"]{10,})"/)?.[1]
+             || r.data.match(/'file'\s*:\s*'(https?:\/\/[^']{10,})'/)?.[1]
+             || r.data.match(/https?:\/\/storage\.mp4upload\.com[^\s"'<>\\]*/)?.[0]
+             || r.data.match(/https?:\/\/[^"'\s<>]*mp4upload[^"'\s<>]*\.mp4[^"'\s<>]*/)?.[0];
+    if (!src) { console.log(`[anime] ⚠️ mp4upload: لم أجد رابط الفيديو`); return null; }
+    console.log(`[anime] ✅ mp4upload src → ${src.slice(0, 80)}`);
+    return { url: src, type: "direct" };
+  } catch (e) { console.log(`[anime] ❌ mp4upload: ${e.message?.slice(0, 50)}`); return null; }
+}
+
+// ─── sortedLinks: classifies and ranks links ─────────────────────────────────
 function sortedLinks(links) {
   return links
     .filter(({ url }) => url && url.startsWith("http") && !SKIP_HOSTERS.some(h => url.includes(h)))
     .map(({ url, q }) => {
-      if (url.includes(".m3u8")) return { url, q: (q || 1) + 100, type: "hls" };
-      const embedId = url.includes("mp4upload.com")
+      const b = q || 1;
+      if (url.includes(".m3u8")) return { url, q: b + 100, type: "hls" };
+      if (url.includes("doodstream.com")) return { url, q: b + 10, type: "doodstream" };
+      const mpId = url.includes("mp4upload.com")
         ? (url.match(/embed-([a-z0-9]+)\.html/)?.[1] || url.match(/mp4upload\.com\/([a-z0-9]+)/)?.[1])
         : null;
-      if (embedId) return { url, q: (q || 1) + 5, type: "mp4upload", embedId };
+      if (mpId) return { url, q: b + 8, type: "mp4upload", embedId: mpId };
+      if (url.includes("voe.sx")) return { url, q: b + 6, type: "voe" };
       const isDirectVideo = /\.(mp4|mkv|avi|webm)(\?|$)/i.test(url);
-      return { url, q: isDirectVideo ? (q || 1) + 3 : (q || 1), type: "direct" };
+      return { url, q: isDirectVideo ? b + 3 : b, type: "direct" };
     })
     .sort((a, b) => b.q - a.q);
 }
 
+// ─── downloadBestLink: iterates candidates, tries specialized extractors ─────
 async function downloadBestLink(links, outFile, referer, onProgress) {
   const ref = referer || "https://animelek.vip/";
   const candidates = sortedLinks(links);
@@ -194,50 +265,53 @@ async function downloadBestLink(links, outFile, referer, onProgress) {
   for (const best of candidates) {
     try {
       if (fs.existsSync(outFile)) fs.unlinkSync(outFile);
+      let resolvedUrl = best.url;
+      let resolvedType = best.type;
 
-      if (best.type === "hls") {
-        console.log(`[anime] ⬇️ HLS → ffmpeg: ${best.url.slice(0, 80)}`);
-        await downloadWithFFmpeg(best.url, ref, outFile);
-
+      // ── Specialized extractors ────────────────────────────────────────────
+      if (best.type === "doodstream") {
+        const res = await extractDoodstream(best.url, ref);
+        if (!res) continue;
+        resolvedUrl = res.url; resolvedType = res.type;
       } else if (best.type === "mp4upload") {
-        console.log(`[anime] ⬇️ mp4upload embed: ${best.embedId}`);
-        const r = await axios.get(`https://www.mp4upload.com/embed-${best.embedId}.html`, {
-          headers: { ...UA, Referer: ref }, timeout: 15000
-        });
-        const src = r.data.match(/"file"\s*:\s*"(https?:\/\/[^"]+\.mp4[^"]*)"/)?.[1]
-                 || r.data.match(/src\s*:\s*["'](https?:\/\/[^"']+\.mp4[^"']*)/)?.[1];
-        if (!src) { console.log(`[anime] ⚠️ mp4upload: لم أجد رابط الفيديو`); continue; }
-        console.log(`[anime] ⬇️ mp4upload src: ${src.slice(0, 80)}`);
-        await downloadDirect(src, outFile, "https://www.mp4upload.com/", onProgress);
+        const res = await extractMp4upload(best.embedId, ref);
+        if (!res) continue;
+        resolvedUrl = res.url; resolvedType = res.type;
+      } else if (best.type === "voe") {
+        const res = await extractVoe(best.url, ref);
+        if (!res) continue;
+        resolvedUrl = res.url; resolvedType = res.type;
+      }
 
+      // ── Download resolved URL ─────────────────────────────────────────────
+      if (resolvedType === "hls") {
+        console.log(`[anime] ⬇️ HLS ffmpeg: ${resolvedUrl.slice(0, 80)}`);
+        await downloadWithFFmpeg(resolvedUrl, ref, outFile);
       } else {
-        // HEAD check first to avoid downloading HTML pages
-        console.log(`[anime] 🔍 HEAD: ${best.url.slice(0, 80)}`);
+        // HEAD check to skip obvious HTML responses
         let skip = false;
         try {
-          const head = await axios.head(best.url, {
+          const head = await axios.head(resolvedUrl, {
             headers: { ...UA, Referer: ref }, timeout: 10000, maxRedirects: 6
           });
           const ct = (head.headers["content-type"] || "").toLowerCase();
           const cl = parseInt(head.headers["content-length"] || "0", 10);
           console.log(`[anime] ↩️ HEAD ct=${ct.split(";")[0]} cl=${(cl/1024/1024).toFixed(1)}MB`);
-          // Skip obvious HTML pages that are not video
-          if (ct.includes("text/html") && !best.url.match(/\.(mp4|mkv|avi)(\?|$)/i)) {
+          if (ct.includes("text/html") && !resolvedUrl.match(/\.(mp4|mkv|avi)(\?|$)/i)) {
             console.log(`[anime] ⛔ HTML response, جرب رابط آخر`);
             skip = true;
           }
         } catch (e) {
-          // HEAD failed (timeout, 405, etc.) — try download anyway for direct-looking URLs
           console.log(`[anime] ⚠️ HEAD فشل (${e.message?.slice(0, 40)}), أحاول التحميل المباشر...`);
         }
         if (skip) continue;
-        console.log(`[anime] ⬇️ direct download: ${best.url.slice(0, 80)}`);
-        await downloadDirect(best.url, outFile, ref, onProgress);
+        console.log(`[anime] ⬇️ direct: ${resolvedUrl.slice(0, 80)}`);
+        await downloadDirect(resolvedUrl, outFile, ref, onProgress);
       }
 
       const mb = checkFile(outFile);
       if (mb) { console.log(`[anime] ✅ تحميل ناجح ${mb.toFixed(1)} MB`); return mb; }
-      console.log(`[anime] ⛔ الملف غير صالح (صغير جداً أو لم يُنشأ)`);
+      console.log(`[anime] ⛔ الملف غير صالح`);
     } catch (e) {
       console.log(`[anime] ❌ فشل: ${e.message?.slice(0, 60)}`);
       continue;
@@ -246,9 +320,74 @@ async function downloadBestLink(links, outFile, referer, onProgress) {
   return null;
 }
 
+// ─── Extract embedded streams from HTML ──────────────────────────────────────
+// Finds direct m3u8/mp4 URLs baked into the page JS (jwplayer, plyr, html5 video)
+// These bypass external file hosters entirely
+
+function extractStreams(html) {
+  const streams = [];
+  const seen = new Set();
+
+  const add = (url, q) => {
+    if (!url || seen.has(url)) return;
+    if (!url.startsWith("http")) return;
+    seen.add(url);
+    streams.push({ url, q, type: url.includes(".m3u8") ? "hls" : "direct" });
+  };
+
+  // <source src="..."> or <video src="...">
+  for (const m of html.matchAll(/(?:src|data-src)\s*=\s*["']([^"']+\.(?:mp4|m3u8|mkv)[^"']*)/gi))
+    add(m[1], 50);
+
+  // jwplayer / plyr / videojs: "file":"URL" or file: "URL"
+  for (const m of html.matchAll(/"file"\s*:\s*"(https?:\/\/[^"]+\.(?:mp4|m3u8)[^"]*)"/gi))
+    add(m[1], 60);
+
+  // sources: [{src:"URL"}]
+  for (const m of html.matchAll(/["']src["']\s*:\s*["'](https?:\/\/[^"']+\.(?:mp4|m3u8)[^"']*)/gi))
+    add(m[1], 55);
+
+  // Any bare https URL ending in .mp4 or .m3u8 in the HTML
+  for (const m of html.matchAll(/https?:\/\/[^\s"'<>\\]+\.(?:mp4|m3u8)(?:[?#][^\s"'<>\\]*)?/gi))
+    add(m[0], 40);
+
+  return streams.sort((a, b) => b.q - a.q);
+}
+
+// ─── Resolve iframe embeds ─────────────────────────────────────────────────────
+// Some pages embed the player in an iframe; fetch the iframe and re-extract
+
+async function resolveIframeStreams(html, referer) {
+  const streams = [];
+  const iframes = [];
+
+  for (const m of html.matchAll(/(?:src|data-src)\s*=\s*["'](https?:\/\/[^"']+)["']/gi)) {
+    const u = m[1];
+    if (u.includes("animelek") || u.includes("shahiid")) continue; // same site, ignore nav iframes
+    if (u.includes("embed") || u.includes("player") || u.includes("stream") ||
+        u.includes("vod") || u.includes("video") || u.includes("play")) {
+      iframes.push(u);
+    }
+  }
+
+  console.log(`[anime] 🖼️ ${iframes.length} iframe(s) للفحص`);
+
+  for (const src of iframes.slice(0, 3)) {
+    try {
+      console.log(`[anime] 🌐 iframe GET ${src.slice(0, 80)}`);
+      const r = await axios.get(src, {
+        headers: { ...UA, Referer: referer }, timeout: 12000
+      });
+      const found = extractStreams(r.data);
+      console.log(`[anime] ↩️ iframe → ${found.length} stream(s)`);
+      streams.push(...found);
+    } catch (_) {}
+  }
+  return streams;
+}
+
 // ─── Source 1: animelek.vip (Primary – confirmed working) ────────────────────
 // Episode URL pattern: /episode/{slug}-{N}-الحلقة/
-// Download links: #downloads li.watch a[href]
 
 async function tryAnimelek(slugs, epNum, outFile, onProgress) {
   const epAr = "%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9";
@@ -265,20 +404,34 @@ async function tryAnimelek(slugs, epNum, outFile, onProgress) {
       if (r.status !== 200) continue;
 
       const $ = cheerio.load(r.data);
-      const links = [];
+      const allLinks = [];
+
+      // ── Priority 1: embedded streams in page HTML (bypass file hosters) ──
+      const pageStreams = extractStreams(r.data);
+      console.log(`[anime] 🎬 ${pageStreams.length} stream(s) مدمج في الصفحة`);
+      allLinks.push(...pageStreams);
+
+      // ── Priority 2: iframe embeds ─────────────────────────────────────────
+      const iframeStreams = await resolveIframeStreams(r.data, ref);
+      allLinks.push(...iframeStreams);
+
+      // ── Priority 3: external download links (file hosters) ───────────────
       $("a[href]").each((_, el) => {
         const h = $(el).attr("href") || "";
         const t = $(el).text().toLowerCase();
         if (!h.startsWith("http") || h.includes("animelek")) return;
         const q = t.match(/fhd|1080/) ? 4 : t.match(/hd|720/) ? 3 : t.match(/sd|480/) ? 2 : 1;
-        links.push({ url: h, q });
+        allLinks.push({ url: h, q });
       });
 
-      console.log(`[anime] 📄 animelek slug=${slug} ep=${epNum} → ${links.length} رابط`);
-      if (!links.length) continue;
-      const mb = await downloadBestLink(links, outFile, ref, onProgress);
+      console.log(`[anime] 📄 animelek slug=${slug} ep=${epNum} → ${allLinks.length} رابط إجمالي`);
+      if (!allLinks.length) continue;
+      const mb = await downloadBestLink(allLinks, outFile, ref, onProgress);
       if (mb) return { filePath: outFile, sizeMB: mb, source: "AnimeLeK 🎌 (مترجم عربي)" };
-    } catch (_) { continue; }
+    } catch (e) {
+      console.log(`[anime] ⛔ tryAnimelek error: ${e.message?.slice(0, 60)}`);
+      continue;
+    }
   }
   return null;
 }
@@ -299,82 +452,104 @@ async function tryShahiid(searchTitles, epNum, outFile, onProgress) {
       });
       const $s = cheerio.load(sRes.data);
 
-      let seasonsUrl = null;
+      // Collect ALL /seasons/ links and pick the best match
+      const seasonsCandidates = [];
       $s("a[href*='/seasons/']").each((_, el) => {
-        if (!seasonsUrl) seasonsUrl = $s(el).attr("href");
-      });
-      console.log(`[anime] ↩️ seasonsUrl=${seasonsUrl || "لم يجد"}`);
-      if (!seasonsUrl) continue;
-
-      // Step 3: Get season page – list episodes
-      const aRes = await axios.get(seasonsUrl, { headers: UA, timeout: 15000 });
-      const $a = cheerio.load(aRes.data);
-
-      // Episode padding (shahiid uses 01, 02...)
-      const padded = String(epNum).padStart(2, "0");
-
-      // Step 4: Find episode link + download ID
-      let epPageUrl = null;
-      let downloadId = null;
-
-      $a("a[href]").each((_, el) => {
-        const h = $a(el).attr("href") || "";
-        const t = $a(el).text().trim();
-        // Episode page: /episodes/anime-title-الحلقة-{XX}-...
-        if (!epPageUrl && h.includes("/episodes/") &&
-            (h.includes(`-%d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-${padded}`) ||
-             h.includes(`الحلقة-${padded}`) ||
-             new RegExp(`[^\\d]0*${epNum}[^\\d]`).test(h))) {
-          epPageUrl = h;
+        const h = $s(el).attr("href") || "";
+        const txt = ($s(el).text() + " " + h).toLowerCase();
+        // Score: prefer link that matches "season N" or query terms
+        const qLower = query.toLowerCase();
+        let score = 0;
+        if (txt.includes(qLower)) score += 10;
+        // Check for season number match (season 3, s3, الموسم 3...)
+        const sNum = qLower.match(/season\s*(\d+)|s(\d+)|الموسم\s*(\d+)/)?.[1]
+                  || qLower.match(/season\s*(\d+)|s(\d+)|الموسم\s*(\d+)/)?.[2]
+                  || qLower.match(/season\s*(\d+)|s(\d+)|الموسم\s*(\d+)/)?.[3];
+        if (sNum) {
+          if (h.includes(`-season-${sNum}`) || h.includes(`-s${sNum}-`) ||
+              txt.includes(`season ${sNum}`) || txt.includes(`الموسم ${sNum}`)) score += 20;
+          if (txt.includes("final") || txt.includes("part")) score -= 5; // penalise finale/part when season num given
         }
-        // Download link: /?download=ID shown next to episode
-        if (!downloadId && h.includes("?download=") &&
-            (t.includes(padded) || t.includes(String(epNum)))) {
-          downloadId = h.split("?download=")[1];
-        }
+        if (!seasonsCandidates.find(c => c.url === h)) seasonsCandidates.push({ url: h, score });
       });
+      seasonsCandidates.sort((a, b) => b.score - a.score);
+      console.log(`[anime] ↩️ موسم مرشح (${seasonsCandidates.length}): ${seasonsCandidates.slice(0,3).map(c=>`${c.score}:${c.url.split('/').slice(-2,-1)[0]}`).join(" | ")}`);
+      if (!seasonsCandidates.length) continue;
 
-      // If no specific match, try positional (episode N = Nth item)
-      if (!epPageUrl) {
-        const epLinks = [];
-        $a("a[href*='/episodes/']").each((_, el) => epLinks.push($a(el).attr("href")));
-        const unique = [...new Set(epLinks)];
-        if (epNum <= unique.length) epPageUrl = unique[epNum - 1];
+      // Try each season candidate until we find one with valid episodes
+      for (const { url: seasonsUrl } of seasonsCandidates.slice(0, 3)) {
+        const epPageUrl = await shahiidFindEpisodePage(seasonsUrl, epNum);
+        if (!epPageUrl) continue;
+
+        console.log(`[anime] 🌐 shahiid epPage: ${epPageUrl}`);
+        const eRes = await axios.get(epPageUrl, { headers: UA, timeout: 15000 });
+
+        const allLinks = [];
+        // embedded streams (highest priority)
+        const pageStreams = extractStreams(eRes.data);
+        console.log(`[anime] 🎬 shahiid ${pageStreams.length} stream(s) مدمج`);
+        allLinks.push(...pageStreams);
+
+        // iframe embeds
+        const iframeStreams = await resolveIframeStreams(eRes.data, ref);
+        allLinks.push(...iframeStreams);
+
+        // external download links from episode page only (skip social/nav)
+        const $e = cheerio.load(eRes.data);
+        $e("a[href]").each((_, el) => {
+          const h = $e(el).attr("href") || "";
+          const t = $e(el).text().toLowerCase();
+          if (!h.startsWith("http") || h.includes("shahiid")) return;
+          const q = t.includes("1080") ? 4 : t.includes("720") ? 3 : t.includes("480") ? 2 : 1;
+          allLinks.push({ url: h, q });
+        });
+
+        console.log(`[anime] 📄 shahiid ep=${epNum} → ${allLinks.length} رابط`);
+        if (!allLinks.length) continue;
+
+        const mb = await downloadBestLink(allLinks, outFile, ref, onProgress);
+        if (mb) return { filePath: outFile, sizeMB: mb, source: "Shahiid Anime 📺 (عربي)" };
       }
-      if (!downloadId) {
-        const dlLinks = [];
-        $a("a[href*='?download=']").each((_, el) => dlLinks.push($a(el).attr("href").split("?download=")[1]));
-        const unique = [...new Set(dlLinks)];
-        if (epNum <= unique.length) downloadId = unique[epNum - 1];
-      }
-
-      // Gather all candidate links for parallel scan
-      const allLinks = [];
-      if (downloadId) allLinks.push({ url: `https://shahiid-anime.net/?download=${downloadId}`, q: 5 });
-
-      if (epPageUrl) {
-        try {
-          const eRes = await axios.get(epPageUrl, { headers: UA, timeout: 15000 });
-          const $e = cheerio.load(eRes.data);
-          const m3u8s = (eRes.data.match(/https?:\/\/[^\s"'\\]+\.m3u8[^\s"'\\]*/g) || []);
-          for (const u of m3u8s) allLinks.push({ url: u, q: 10 });
-          $e("a[href]").each((_, el) => {
-            const h = $e(el).attr("href") || "";
-            const t = $e(el).text().toLowerCase();
-            if (!h.startsWith("http") || h.includes("shahiid")) return;
-            const q = t.includes("1080") ? 4 : t.includes("720") ? 3 : t.includes("480") ? 2 : 1;
-            allLinks.push({ url: h, q });
-          });
-        } catch (_) {}
-      }
-
-      console.log(`[anime] 📄 shahiid query="${searchTitles[0]}" ep=${epNum} → ${allLinks.length} رابط`);
-      if (!allLinks.length) continue;
-      const mb = await downloadBestLink(allLinks, outFile, ref, onProgress);
-      if (mb) return { filePath: outFile, sizeMB: mb, source: "Shahiid Anime 📺 (عربي)" };
-    } catch (_) { continue; }
+    } catch (e) {
+      console.log(`[anime] ⛔ tryShahiid err: ${e.message?.slice(0, 50)}`);
+      continue;
+    }
   }
   return null;
+}
+
+// Helper: fetches a shahiid season page and returns the URL of episode N
+async function shahiidFindEpisodePage(seasonsUrl, epNum) {
+  try {
+    const aRes = await axios.get(seasonsUrl, { headers: { "User-Agent": UA["User-Agent"] }, timeout: 15000 });
+    const $a = cheerio.load(aRes.data);
+    const padded = String(epNum).padStart(2, "0");
+
+    // Collect all /episodes/ links
+    const epLinks = [];
+    $a("a[href*='/episodes/']").each((_, el) => {
+      const h = $a(el).attr("href");
+      if (h && !epLinks.includes(h)) epLinks.push(h);
+    });
+    console.log(`[anime] ↩️ shahiid seasons page → ${epLinks.length} حلقة`);
+
+    if (!epLinks.length) return null;
+
+    // Try to find the right episode by number in URL
+    for (const h of epLinks) {
+      const inUrl = h.includes(`-${padded}-`) || h.includes(`-${epNum}-`)
+                 || h.match(new RegExp(`[^0-9]0*${epNum}[^0-9]`));
+      if (inUrl) { console.log(`[anime] ↩️ matched ep URL: ${h}`); return h; }
+    }
+
+    // Positional fallback — episode N = Nth link in page order
+    const idx = epNum - 1;
+    if (idx < epLinks.length) {
+      console.log(`[anime] ↩️ positional ep URL[${idx}]: ${epLinks[idx]}`);
+      return epLinks[idx];
+    }
+    return null;
+  } catch (_) { return null; }
 }
 
 // ─── Source 3: animelek search fallback ──────────────────────────────────────
