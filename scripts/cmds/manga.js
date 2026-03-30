@@ -3,9 +3,19 @@ const fs = require("fs-extra");
 const path = require("path");
 
 const API = "https://api.mangadex.org";
+const MB_BASE = "https://mangabuddy.com";
 const CACHE = path.join(__dirname, "cache");
 const CHAPTERS_PER_PAGE = 25;
 const PAGE_BATCH = 30;
+
+const MB_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "Referer": MB_BASE + "/"
+};
+
+const MB_NAV = new Set(["home","popular","latest","manga-list","discussions","settings",
+  "bookmarks","history","notifications","search","genres","az-list","contact",
+  "privacy-policy","terms-of-service","dmca","newest","login","register"]);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -15,7 +25,13 @@ function getMangaTitle(manga) {
 }
 
 function getLangFlag(lang) {
-  return lang === "ar" ? "🇸🇦" : lang === "en" ? "🇬🇧" : `[${lang}]`;
+  const flags = {
+    ar: "🇸🇦", en: "🇬🇧", fr: "🇫🇷", es: "🇪🇸", "es-la": "🇲🇽",
+    "pt-br": "🇧🇷", pt: "🇵🇹", ru: "🇷🇺", tr: "🇹🇷", it: "🇮🇹",
+    de: "🇩🇪", id: "🇮🇩", vi: "🇻🇳", th: "🇹🇭", ko: "🇰🇷",
+    ja: "🇯🇵", zh: "🇨🇳", "zh-hk": "🇭🇰", pl: "🇵🇱", uk: "🇺🇦"
+  };
+  return flags[lang] || `[${lang}]`;
 }
 
 function getContentTypeLabel(lang) {
@@ -28,118 +44,164 @@ function getStatusLabel(s) {
   return { ongoing: "مستمرة 🟢", completed: "مكتملة ✅", hiatus: "متوقفة ⏸", cancelled: "ملغاة ❌" }[s] || s || "—";
 }
 
-// ─── MangaDex API — بحث ثلاثي بأولوية عربية ──────────────────────────────────
+// ─── MangaDex API ─────────────────────────────────────────────────────────────
 
-function buildMDQuery(query, { langs = [], originalLangs = [], ratings = ["safe", "suggestive"], limit = 15 } = {}) {
-  const p = [
-    `title=${encodeURIComponent(query)}`,
-    `limit=${limit}`,
-    "order[relevance]=desc",
-    "includes[]=cover_art"
-  ];
-  langs.forEach(l => p.push(`availableTranslatedLanguage[]=${l}`));
-  originalLangs.forEach(l => p.push(`originalLanguage[]=${l}`));
-  ratings.forEach(r => p.push(`contentRating[]=${r}`));
-  return `${API}/manga?${p.join("&")}`;
-}
-
-async function mdSearch(url) {
+async function searchManga(query) {
   try {
+    const url = `${API}/manga?title=${encodeURIComponent(query)}&limit=15&order[relevance]=desc&includes[]=cover_art&contentRating[]=safe&contentRating[]=suggestive`;
     const res = await axios.get(url, { timeout: 20000 });
     return res.data.data || [];
   } catch (_) { return []; }
 }
 
-async function searchManga(query, { originalLangs = [], ratings = ["safe", "suggestive"] } = {}) {
-  // بحث 1: عربي فقط (أعلى أولوية)
-  // بحث 2: عربي + إنجليزي (يملأ الفراغات)
-  // بحث 3: بدون فلتر لغة (أوسع نطاق — يضيف ما لم يظهر في 1 و 2)
-  const opts = { originalLangs, ratings };
-  const [arOnly, arEn, broad] = await Promise.all([
-    mdSearch(buildMDQuery(query, { ...opts, langs: ["ar"],       limit: 15 })),
-    mdSearch(buildMDQuery(query, { ...opts, langs: ["ar", "en"], limit: 15 })),
-    mdSearch(buildMDQuery(query, { ...opts, langs: [],            limit: 15 }))
-  ]);
-
-  // دمج: العربي أولاً، ثم إضافة ما لم يظهر، بحد أقصى 15
-  const seen = new Set();
-  const merged = [];
-  for (const list of [arOnly, arEn, broad]) {
-    for (const m of list) {
-      if (!seen.has(m.id)) { seen.add(m.id); merged.push(m); }
-    }
-    if (merged.length >= 15) break;
-  }
-  return merged.slice(0, 15);
-}
-
-async function getAllChapters(mangaId) {
+async function fetchFeed(mangaId, langs = []) {
   let all = [];
   let offset = 0;
   const limit = 96;
   while (true) {
     const parts = [
-      `translatedLanguage[]=ar`,
-      `translatedLanguage[]=en`,
-      `order[chapter]=asc`,
-      `order[volume]=asc`,
-      `limit=${limit}`,
-      `offset=${offset}`
+      `order[chapter]=asc`, `order[volume]=asc`,
+      `limit=${limit}`, `offset=${offset}`,
+      `contentRating[]=safe`, `contentRating[]=suggestive`,
+      `contentRating[]=erotica`, `contentRating[]=pornographic`
     ];
-    const res = await axios.get(`${API}/manga/${mangaId}/feed?${parts.join("&")}`, { timeout: 20000 });
-    const data = res.data.data || [];
-    all = all.concat(data);
-    if (all.length >= res.data.total || data.length < limit) break;
-    offset += limit;
-    await new Promise(r => setTimeout(r, 300));
+    langs.forEach(l => parts.push(`translatedLanguage[]=${l}`));
+    try {
+      const res = await axios.get(`${API}/manga/${mangaId}/feed?${parts.join("&")}`, { timeout: 20000 });
+      const data = res.data.data || [];
+      all = all.concat(data);
+      if (all.length >= res.data.total || data.length < limit) break;
+      offset += limit;
+      await new Promise(r => setTimeout(r, 200));
+    } catch (_) { break; }
   }
   return all;
 }
 
-async function getChapterPages(chapterId) {
+async function getDxArabicChapters(mangaId) {
+  const arFeed = await fetchFeed(mangaId, ["ar"]);
+  if (arFeed.length > 0) return arFeed;
+  return [];
+}
+
+async function getDxChapterPages(chapterId) {
   const res = await axios.get(`${API}/at-home/server/${chapterId}`, { timeout: 15000 });
   const { baseUrl, chapter } = res.data;
   return chapter.data.map(f => `${baseUrl}/data/${chapter.hash}/${f}`);
 }
 
-// ─── Chapter processing ───────────────────────────────────────────────────────
+// ─── MangaBuddy API ───────────────────────────────────────────────────────────
 
-function dedupeChapters(chapters) {
-  const seen = new Map();
-  for (const ch of chapters) {
-    const num = ch.attributes.chapter || "0";
-    const lang = ch.attributes.translatedLanguage;
-    if (!seen.has(num)) {
-      seen.set(num, ch);
-    } else {
-      // Prefer Arabic over English
-      if (lang === "ar") seen.set(num, ch);
-    }
-  }
-  return [...seen.values()].sort((a, b) => {
-    const n1 = parseFloat(a.attributes.chapter || "0");
-    const n2 = parseFloat(b.attributes.chapter || "0");
-    return n1 - n2;
-  });
+async function mbSearch(query) {
+  try {
+    const res = await axios.get(`${MB_BASE}/search?q=${encodeURIComponent(query)}`, {
+      timeout: 15000, headers: MB_HEADERS
+    });
+    const links = [...new Set(res.data.match(/href="\/([a-z0-9-]+)"/g) || [])];
+    const slugs = links
+      .map(l => l.replace(/^href="\//, "").replace(/"$/, ""))
+      .filter(l => l.length > 2 && !MB_NAV.has(l));
+    return slugs.length > 0 ? slugs[0] : null;
+  } catch (_) { return null; }
 }
 
-function buildChapterListBody(mangaTitle, chapters, page) {
+async function mbGetChapters(mangaSlug) {
+  try {
+    const res = await axios.get(`${MB_BASE}/${mangaSlug}`, {
+      timeout: 15000, headers: MB_HEADERS
+    });
+    const matches = [...res.data.matchAll(/href="\/[a-z0-9-]+\/(chapter-[a-z0-9-]+)"/g)];
+    const seen = new Set();
+    const chapters = [];
+    for (const m of matches) {
+      const slug = m[1];
+      const numMatch = slug.match(/chapter-(\d+(?:\.\d+)?)/);
+      if (!numMatch) continue;
+      const num = numMatch[1];
+      if (seen.has(num)) continue;
+      seen.add(num);
+      chapters.push({ num, slug, mangaSlug });
+    }
+    chapters.sort((a, b) => parseFloat(a.num) - parseFloat(b.num));
+    return chapters;
+  } catch (_) { return []; }
+}
+
+async function mbGetChapterImages(mangaSlug, chapterSlug) {
+  const res = await axios.get(`${MB_BASE}/${mangaSlug}/${chapterSlug}`, {
+    timeout: 20000, headers: MB_HEADERS
+  });
+  const chapImages = res.data.match(/var chapImages = '([^']+)'/)?.[1];
+  if (!chapImages) throw new Error("chapImages not found");
+  return chapImages.split(",").filter(u => u.startsWith("http"));
+}
+
+// ─── Unified chapter merging ───────────────────────────────────────────────────
+// Unified chapter: { num, flag, dxId, mbSlug, mbMangaSlug, title }
+// dxId → read from MangaDex (Arabic preferred)
+// mbSlug → read from MangaBuddy (English)
+
+function buildUnifiedChapters(mbChapters, dxArChapters) {
+  // Build a map of Arabic MangaDex chapters by chapter number
+  const dxArMap = new Map();
+  for (const ch of dxArChapters) {
+    const num = ch.attributes.chapter || "0";
+    if (!dxArMap.has(num)) dxArMap.set(num, ch);
+  }
+
+  // Use MangaBuddy as base (full list), tag Arabic when available
+  const chapters = mbChapters.map(mb => {
+    const dxCh = dxArMap.get(mb.num);
+    return {
+      num: mb.num,
+      flag: dxCh ? "🇸🇦" : "🇬🇧",
+      title: dxCh?.attributes?.title || "",
+      dxId: dxCh?.id || null,
+      mbSlug: mb.slug,
+      mbMangaSlug: mb.mangaSlug
+    };
+  });
+
+  // If MangaBuddy has no chapters but MangaDex does, use MangaDex
+  if (chapters.length === 0 && dxArChapters.length > 0) {
+    const seen = new Map();
+    for (const ch of dxArChapters) {
+      const num = ch.attributes.chapter || "0";
+      if (!seen.has(num)) seen.set(num, ch);
+    }
+    return [...seen.values()]
+      .sort((a, b) => parseFloat(a.attributes.chapter || 0) - parseFloat(b.attributes.chapter || 0))
+      .map(ch => ({
+        num: ch.attributes.chapter || "؟",
+        flag: getLangFlag(ch.attributes.translatedLanguage),
+        title: ch.attributes.title || "",
+        dxId: ch.id,
+        mbSlug: null,
+        mbMangaSlug: null
+      }));
+  }
+
+  return chapters;
+}
+
+// ─── Chapter list display ──────────────────────────────────────────────────────
+
+function buildChapterListBody(mangaTitle, chapters, page, source) {
   const totalPages = Math.ceil(chapters.length / CHAPTERS_PER_PAGE);
   const start = page * CHAPTERS_PER_PAGE;
   const slice = chapters.slice(start, start + CHAPTERS_PER_PAGE);
-  const arCount = chapters.filter(c => c.attributes.translatedLanguage === "ar").length;
-  const enCount = chapters.filter(c => c.attributes.translatedLanguage === "en").length;
+  const arCount = chapters.filter(c => c.flag === "🇸🇦").length;
 
   let body = `📖 ${mangaTitle}\n`;
-  body += `📚 ${chapters.length} فصل | 🇸🇦 ${arCount} عربي · 🇬🇧 ${enCount} إنجليزي\n`;
-  body += `📄 الصفحة ${page + 1}/${totalPages}\n`;
+  body += `📚 ${chapters.length} فصل`;
+  if (arCount > 0) body += ` | 🇸🇦 ${arCount} بالعربية`;
+  if (source === "mb") body += ` | 🇬🇧 إنجليزي`;
+  body += `\n📄 الصفحة ${page + 1}/${totalPages}\n`;
   body += "━━━━━━━━━━━━━━━━━━\n\n";
 
   slice.forEach(ch => {
-    const num = ch.attributes.chapter || "؟";
-    const flag = getLangFlag(ch.attributes.translatedLanguage);
-    const title = ch.attributes.title ? ` — ${ch.attributes.title.slice(0, 30)}` : "";
-    body += `${flag} فصل ${num}${title}\n`;
+    const title = ch.title ? ` — ${ch.title.slice(0, 25)}` : "";
+    body += `${ch.flag} فصل ${ch.num}${title}\n`;
   });
 
   body += "\n↩️ رد برقم الفصل لقراءته.";
@@ -152,14 +214,12 @@ function buildChapterListBody(mangaTitle, chapters, page) {
 
 async function sendChapterPages(api, event, chapter, mangaTitle, chapters, currentIndex, commandName) {
   const { threadID } = event;
-  const chNum = chapter.attributes.chapter || "؟";
-  const lang = getLangFlag(chapter.attributes.translatedLanguage);
-  const chTitle = chapter.attributes.title ? ` — ${chapter.attributes.title}` : "";
+  const chNum = chapter.num;
 
   let waitMsgID = null;
   await new Promise(resolve => {
     api.sendMessage(
-      `⏳ جاري تحميل ${lang} فصل ${chNum}${chTitle}\n📖 "${mangaTitle}"`,
+      `⏳ جاري تحميل ${chapter.flag} فصل ${chNum}\n📖 "${mangaTitle}"`,
       threadID,
       (err, info) => { if (info) waitMsgID = info.messageID; resolve(); }
     );
@@ -167,7 +227,28 @@ async function sendChapterPages(api, event, chapter, mangaTitle, chapters, curre
 
   try {
     fs.ensureDirSync(CACHE);
-    const pages = await getChapterPages(chapter.id);
+
+    // Get image URLs: MangaDex Arabic first, then MangaBuddy
+    let pages = [];
+    let langUsed = chapter.flag;
+
+    if (chapter.dxId) {
+      try {
+        pages = await getDxChapterPages(chapter.dxId);
+        langUsed = "🇸🇦";
+      } catch (e) {
+        console.error("[manga:dx-pages]", e.message, "→ falling back to MangaBuddy");
+      }
+    }
+
+    if (pages.length === 0 && chapter.mbSlug && chapter.mbMangaSlug) {
+      pages = await mbGetChapterImages(chapter.mbMangaSlug, chapter.mbSlug);
+      langUsed = "🇬🇧";
+    }
+
+    if (pages.length === 0) throw new Error("No images found for this chapter");
+
+    const referer = langUsed === "🇸🇦" ? "https://mangadex.org" : MB_BASE + "/";
     const totalBatches = Math.ceil(pages.length / PAGE_BATCH);
 
     for (let i = 0; i < pages.length; i += PAGE_BATCH) {
@@ -177,20 +258,20 @@ async function sendChapterPages(api, event, chapter, mangaTitle, chapters, curre
       for (let j = 0; j < batch.length; j++) {
         const url = batch[j];
         const ext = path.extname(url.split("?")[0]).replace(".", "") || "jpg";
-        const filePath = path.join(CACHE, `manga_${chapter.id}_p${i + j + 1}.${ext}`);
-        const res = await axios.get(url, {
+        const filePath = path.join(CACHE, `manga_ch${chNum}_p${i + j + 1}.${ext}`);
+        const imgRes = await axios.get(url, {
           responseType: "arraybuffer",
           timeout: 30000,
-          headers: { "Referer": "https://mangadex.org" }
+          headers: { "Referer": referer, "User-Agent": MB_HEADERS["User-Agent"] }
         });
-        fs.writeFileSync(filePath, Buffer.from(res.data));
+        fs.writeFileSync(filePath, Buffer.from(imgRes.data));
         pageFiles.push(filePath);
       }
 
       const batchNum = Math.floor(i / PAGE_BATCH) + 1;
       const body =
         `📖 ${mangaTitle}\n` +
-        `${lang} فصل ${chNum}${chTitle}\n` +
+        `${langUsed} فصل ${chNum}\n` +
         `🖼 الصفحات ${i + 1}–${i + pageFiles.length} من ${pages.length}` +
         (totalBatches > 1 ? ` (جزء ${batchNum}/${totalBatches})` : "");
 
@@ -207,9 +288,9 @@ async function sendChapterPages(api, event, chapter, mangaTitle, chapters, curre
 
     const prev = currentIndex > 0 ? chapters[currentIndex - 1] : null;
     const next = chapters[currentIndex + 1];
-    let nav = `✅ انتهى ${lang} فصل ${chNum} من "${mangaTitle}".\n\n`;
-    if (next) nav += `▶️ ↩️ رد بـ "next" — فصل ${next.attributes.chapter} ${getLangFlag(next.attributes.translatedLanguage)}\n`;
-    if (prev) nav += `◀️ ↩️ رد بـ "prev" — فصل ${prev.attributes.chapter} ${getLangFlag(prev.attributes.translatedLanguage)}\n`;
+    let nav = `✅ انتهى ${langUsed} فصل ${chNum} من "${mangaTitle}".\n\n`;
+    if (next) nav += `▶️ ↩️ رد بـ "next" — فصل ${next.num} ${next.flag}\n`;
+    if (prev) nav += `◀️ ↩️ رد بـ "prev" — فصل ${prev.num} ${prev.flag}\n`;
     nav += `↩️ أو رد برقم أي فصل للانتقال إليه.`;
 
     api.sendMessage(nav, threadID, (err, info) => {
@@ -232,14 +313,14 @@ module.exports = {
   config: {
     name: "manga",
     aliases: ["man", "مانغا", "مانجا", "مانغة"],
-    version: "5.0",
+    version: "7.0",
     author: "Saint",
     countDown: 5,
     role: 0,
-    shortDescription: "اقرأ المانغا والمانهوا بالعربية أو الإنجليزية",
-    longDescription: "ابحث عن أي مانغا أو مانهوا أو مانهوا صينية واستعرض فصولها وحمّلها — يدعم الترجمة العربية والإنجليزية عبر MangaDex",
+    shortDescription: "اقرأ المانغا بالعربية أو الإنجليزية — فصول كاملة",
+    longDescription: "ابحث عن أي مانغا أو مانهوا — الفصول العربية من MangaDex والفصول الإنجليزية الكاملة من MangaBuddy",
     category: "anime",
-    guide: { en: "{pn} <اسم المانغا أو المانهوا>\nمثال: {pn} naruto\n{pn} solo leveling\n{pn} one piece" }
+    guide: { en: "{pn} <اسم المانغا>\nمثال: {pn} naruto\n{pn} solo leveling\n{pn} jujutsu kaisen" }
   },
 
   onStart: async function ({ api, event, args, commandName }) {
@@ -248,7 +329,7 @@ module.exports = {
 
     if (!query) {
       return api.sendMessage(
-        "📚 اكتب اسم المانغا أو المانهوا.\n\nأمثلة:\n/manga naruto\n/manga solo leveling\n/manga attack on titan\n/manga الفتى الذي تحدى الإله\n\n💡 يدعم المانغا والمانهوا والمانهوا الصينية",
+        "📚 اكتب اسم المانغا أو المانهوا.\n\nأمثلة:\n/manga naruto\n/manga jujutsu kaisen\n/manga solo leveling\n\n🇸🇦 الفصول العربية أولوية\n🇬🇧 الفصول الإنجليزية متوفرة دائماً",
         threadID, messageID
       );
     }
@@ -259,7 +340,7 @@ module.exports = {
       if (!results.length) {
         api.setMessageReaction("❌", messageID, () => {}, true);
         return api.sendMessage(
-          `❌ لم أجد نتائج لـ "${query}" متوفرة بالعربية أو الإنجليزية.\n💡 جرب الاسم بالإنجليزي.`,
+          `❌ لم أجد نتائج لـ "${query}".\n💡 جرب الاسم بالإنجليزي.`,
           threadID, messageID
         );
       }
@@ -269,11 +350,13 @@ module.exports = {
         const title = getMangaTitle(manga);
         const type = getContentTypeLabel(manga.attributes.originalLanguage);
         const status = getStatusLabel(manga.attributes.status);
-        const chCount = manga.attributes.lastChapter || "?";
-        const hasAr = manga.attributes.availableTranslatedLanguages?.includes("ar");
-        const langBadge = hasAr ? "🇸🇦" : "🇬🇧";
+        const lastCh = manga.attributes.lastChapter || "?";
+        const langs = manga.attributes.availableTranslatedLanguages || [];
+        const hasAr = langs.includes("ar");
+        const hasEn = langs.includes("en");
+        const langBadge = hasAr ? "🇸🇦" : hasEn ? "🇬🇧" : "🌐";
         body += `${i + 1}️⃣ ${title}\n`;
-        body += `   ${type} · ${status} · فصل ${chCount} · ${langBadge}\n\n`;
+        body += `   ${type} · ${status} · ${lastCh} فصل · ${langBadge}\n\n`;
       });
       body += "↩️ رد برقم للقراءة.";
 
@@ -307,32 +390,70 @@ module.exports = {
       const title = getMangaTitle(manga);
       const type = getContentTypeLabel(manga.attributes.originalLanguage);
       const desc = (manga.attributes.description?.en || manga.attributes.description?.ar || "").replace(/<[^>]+>/g, "").slice(0, 200);
-      const genres = (manga.attributes.tags || []).filter(t => t.attributes.group === "genre").map(t => t.attributes.name.en || Object.values(t.attributes.name)[0]).slice(0, 5).join(" · ");
+      const genres = (manga.attributes.tags || [])
+        .filter(t => t.attributes.group === "genre")
+        .map(t => t.attributes.name.en || Object.values(t.attributes.name)[0])
+        .slice(0, 5).join(" · ");
 
       api.setMessageReaction("⏳", messageID, () => {}, true);
 
       try {
-        const rawChapters = await getAllChapters(manga.id);
-        const chapters = dedupeChapters(rawChapters);
+        // جلب الفصول بالتوازي: MangaDex العربية + MangaBuddy
+        const [dxArChapters, mbSlug] = await Promise.all([
+          getDxArabicChapters(manga.id),
+          mbSearch(title)
+        ]);
+
+        let mbChapters = [];
+        if (mbSlug) {
+          mbChapters = await mbGetChapters(mbSlug);
+        }
+
+        // بناء القائمة الموحدة
+        const chapters = buildUnifiedChapters(mbChapters, dxArChapters);
 
         if (!chapters.length) {
           api.setMessageReaction("❌", messageID, () => {}, true);
-          return api.sendMessage(`❌ لا توجد فصول متاحة لـ "${title}".`, threadID, messageID);
+          return api.sendMessage(
+            `❌ لا توجد فصول متاحة لـ "${title}".\n\n💡 قد تكون المانغا غير موجودة في المصادر المتاحة.`,
+            threadID, messageID
+          );
+        }
+
+        const arCount = chapters.filter(c => c.flag === "🇸🇦").length;
+        const source = mbChapters.length > 0 ? "mb" : "dx";
+
+        // رسالة تنبيه إذا كانت الفصول المتاحة أقل من الإجمالي
+        const lastCh = manga.attributes.lastChapter;
+        let sourceNote = "";
+        if (source === "mb") {
+          sourceNote = arCount > 0
+            ? `\n🇸🇦 ${arCount} فصل بالعربية · 🇬🇧 ${chapters.length} فصل بالإنجليزية`
+            : `\n🇬🇧 ${chapters.length} فصل بالإنجليزية (لا يوجد عربي)`;
+        } else {
+          sourceNote = `\n🇸🇦 ${arCount} فصل بالعربية (من MangaDex)`;
+        }
+
+        let warningNote = "";
+        if (lastCh && parseInt(lastCh) > 0 && chapters.length < parseInt(lastCh) * 0.3) {
+          warningNote = `\n⚠️ متاح ${chapters.length} من أصل ~${lastCh} فصل`;
         }
 
         api.setMessageReaction("✅", messageID, () => {}, true);
 
         let body = `${type} ${title}\n━━━━━━━━━━━━━━━━━━\n`;
-        body += `📚 ${chapters.length} فصل | ${getStatusLabel(manga.attributes.status)}\n`;
+        body += `📚 ${chapters.length} فصل | ${getStatusLabel(manga.attributes.status)}`;
+        body += sourceNote + warningNote + "\n";
         if (genres) body += `🏷 ${genres}\n`;
         if (desc) body += `\n📝 ${desc}...\n`;
-        body += `\n${buildChapterListBody(title, chapters, 0)}`;
+        body += `\n${buildChapterListBody(title, chapters, 0, source)}`;
 
         api.sendMessage(body, threadID, (err, info) => {
           if (err || !info) return;
           global.GoatBot.onReply.set(info.messageID, {
             commandName, author: event.senderID,
-            state: "browse_chapters", chapters, mangaTitle: title, page: 0, messageID: info.messageID
+            state: "browse_chapters", chapters, mangaTitle: title,
+            page: 0, source, messageID: info.messageID
           });
         });
         try { api.unsendMessage(Reply.messageID); } catch (_) {}
@@ -345,7 +466,7 @@ module.exports = {
 
     // ── تصفح الفصول
     } else if (state === "browse_chapters") {
-      const { chapters, mangaTitle, page } = Reply;
+      const { chapters, mangaTitle, page, source } = Reply;
       const input = event.body.trim().toLowerCase();
       const totalPages = Math.ceil(chapters.length / CHAPTERS_PER_PAGE);
 
@@ -353,19 +474,20 @@ module.exports = {
         const newPage = input === "next" ? page + 1 : page - 1;
         if (newPage < 0 || newPage >= totalPages)
           return api.sendMessage("❌ لا توجد صفحات أخرى.", threadID, messageID);
-        const body = buildChapterListBody(mangaTitle, chapters, newPage);
+        const body = buildChapterListBody(mangaTitle, chapters, newPage, source);
         api.sendMessage(body, threadID, (err, info) => {
           if (err || !info) return;
           global.GoatBot.onReply.set(info.messageID, {
             commandName, author: event.senderID,
-            state: "browse_chapters", chapters, mangaTitle, page: newPage, messageID: info.messageID
+            state: "browse_chapters", chapters, mangaTitle, page: newPage, source,
+            messageID: info.messageID
           });
         });
         try { api.unsendMessage(Reply.messageID); } catch (_) {}
         return;
       }
 
-      const chapter = chapters.find(ch => String(ch.attributes.chapter) === input);
+      const chapter = chapters.find(ch => String(ch.num) === input);
       if (!chapter)
         return api.sendMessage(`❌ الفصل "${input}" غير موجود. تأكد من الرقم.`, threadID, messageID);
 
@@ -387,7 +509,7 @@ module.exports = {
       if (input === "next") targetIndex = currentIndex + 1;
       else if (input === "prev") targetIndex = currentIndex - 1;
       else {
-        const found = chapters.findIndex(ch => String(ch.attributes.chapter) === event.body.trim());
+        const found = chapters.findIndex(ch => String(ch.num) === event.body.trim());
         if (found !== -1) targetIndex = found;
       }
 
