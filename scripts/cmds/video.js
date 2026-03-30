@@ -1,188 +1,273 @@
-const fs     = require("fs-extra");
-const path   = require("path");
-const axios  = require("axios");
-const ytSearch = require("yt-search");
-const ytdl   = require("@distube/ytdl-core");
-
-const CACHE_DIR  = path.join(__dirname, "cache");
-const MAX_BYTES  = 24 * 1024 * 1024; // 24 MB — حد فيسبوك للملفات
+const fs        = require("fs-extra");
+const path      = require("path");
+const axios     = require("axios");
+const { spawn } = require("child_process");
+const ytSearch  = require("yt-search");
 
 // ─────────────────────────────────────────
-// بحث عن أشهر فيديو مطابق للاستعلام
+// إعدادات عامة
+// ─────────────────────────────────────────
+const TMP_DIR    = process.env.RAILWAY_ENVIRONMENT ? "/tmp/ytbot" : path.join(__dirname, "cache");
+const MAX_MB     = 90;
+const MAX_BYTES  = MAX_MB * 1024 * 1024;
+const DL_TIMEOUT = 8 * 60 * 1000;  // 8 دقائق
+
+// اختيار الجودة بناءً على مدة الفيديو (للبقاء تحت 90 ميغابايت)
+function qualityForDuration(durationSecs) {
+  if (!durationSecs)        return "480";
+  if (durationSecs <  5*60) return "720";   // < 5 دقائق
+  if (durationSecs < 15*60) return "480";   // < 15 دقيقة
+  if (durationSecs < 40*60) return "360";   // < 40 دقيقة
+  return "240";                              // فيديوهات طويلة جداً
+}
+
+// ─────────────────────────────────────────
+// بحث يوتيوب
 // ─────────────────────────────────────────
 async function findBestVideo(query, channelHint) {
   const result = await ytSearch(query);
-  let videos = (result.videos || []).filter(v => v.url && v.videoId);
+  let videos   = (result.videos || []).filter(v => v.url && v.videoId);
   if (!videos.length) return null;
 
-  // تصفية بالقناة إذا طُلب ذلك
   if (channelHint) {
-    const hint = channelHint.toLowerCase().trim();
+    const hint     = channelHint.toLowerCase().trim();
     const filtered = videos.filter(v =>
       (v.author?.name || "").toLowerCase().includes(hint)
     );
     if (filtered.length > 0) videos = filtered;
   }
 
-  // الأكثر مشاهدة أولاً
   videos.sort((a, b) => (b.views || 0) - (a.views || 0));
   return videos[0];
 }
 
 // ─────────────────────────────────────────
-// اختيار أفضل صيغة للتنزيل (فيديو+صوت معاً)
+// التنزيل بـ yt-dlp (الأكثر موثوقية)
 // ─────────────────────────────────────────
-function pickFormat(formats) {
-  const combined = formats.filter(f =>
-    f.hasVideo && f.hasAudio &&
-    (f.container === "mp4" || (f.mimeType || "").includes("mp4"))
-  );
+function downloadWithYtDlp(videoUrl, outputPath, quality) {
+  return new Promise((resolve, reject) => {
+    // صيغة الاختيار: فيديو + صوت مع حد جودة + fallback لأي صيغة متاحة
+    const formatStr =
+      `bestvideo[height<=${quality}][ext=mp4]+bestaudio[ext=m4a]` +
+      `/bestvideo[height<=${quality}]+bestaudio` +
+      `/best[height<=${quality}]` +
+      `/best`;
 
-  // رتّب من الأعلى جودة للأقل
-  combined.sort((a, b) => {
-    const qa = parseInt((a.qualityLabel || "0")) || 0;
-    const qb = parseInt((b.qualityLabel || "0")) || 0;
-    return qb - qa;
+    const args = [
+      "--no-playlist",
+      "--no-warnings",
+      "--quiet",
+      "-f", formatStr,
+      "--merge-output-format", "mp4",
+      "--max-filesize", `${MAX_MB}M`,
+      "--socket-timeout", "30",
+      "--retries", "3",
+      "-o", outputPath,
+      videoUrl
+    ];
+
+    const proc   = spawn("yt-dlp", args);
+    const timer  = setTimeout(() => { proc.kill(); reject(new Error("TIMEOUT")); }, DL_TIMEOUT);
+    let   stderr = "";
+
+    proc.stderr.on("data", d => { stderr += d.toString(); });
+    proc.stdout.on("data", () => {});
+
+    proc.on("close", code => {
+      clearTimeout(timer);
+      if (code === 0) return resolve();
+      // yt-dlp exit 1 يمكن أن يكون بسبب max-filesize → نتحقق
+      if (stderr.includes("File is larger than max-filesize")) {
+        return reject(new Error("TOO_LARGE"));
+      }
+      reject(new Error(`yt-dlp exited ${code}: ${stderr.slice(-400)}`));
+    });
+
+    proc.on("error", e => { clearTimeout(timer); reject(e); });
   });
-
-  // اختر أعلى جودة لا يتجاوز حجمها 24 ميغابايت
-  for (const fmt of combined) {
-    const size = parseInt(fmt.contentLength || 0);
-    if (!size || size <= MAX_BYTES) return fmt;
-  }
-
-  // إذا فشل التقدير بالحجم → خذ أقل جودة متاحة (أصغر حجماً)
-  return combined[combined.length - 1] || null;
 }
 
 // ─────────────────────────────────────────
-// تنزيل الفيديو وحفظه مؤقتاً
+// تنزيل بديل — cobalt.tools API
 // ─────────────────────────────────────────
-async function downloadVideo(videoUrl, outputPath) {
-  const info    = await ytdl.getInfo(videoUrl);
-  const format  = pickFormat(info.formats);
-  if (!format) throw new Error("NO_FORMAT");
-
-  await new Promise((resolve, reject) => {
-    const stream = ytdl(videoUrl, { format });
-    const file   = fs.createWriteStream(outputPath);
-    stream.pipe(file);
-    file.on("finish", resolve);
-    file.on("error",  reject);
-    stream.on("error", reject);
-  });
-
-  return { format, info };
-}
-
-// ─────────────────────────────────────────
-// تنزيل بديل عبر cobalt.tools إذا فشل ytdl
-// ─────────────────────────────────────────
-async function downloadFallback(videoUrl, outputPath) {
+async function downloadCobalt(videoUrl, outputPath, quality) {
   const resp = await axios.post(
     "https://api.cobalt.tools/",
-    { url: videoUrl, vCodec: "h264", vQuality: "360", filenameStyle: "basic" },
     {
-      headers: { "Accept": "application/json", "Content-Type": "application/json" },
-      timeout: 20000
+      url:           videoUrl,
+      vCodec:        "h264",
+      vQuality:      quality,
+      filenameStyle: "basic",
+      isNoTTWatermark: true
+    },
+    {
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      timeout: 30000
     }
   );
 
   const dlUrl = resp.data?.url;
-  if (!dlUrl) throw new Error("COBALT_FAIL");
+  if (!dlUrl) throw new Error("COBALT_NO_URL");
 
-  const file = await axios.get(dlUrl, { responseType: "arraybuffer", timeout: 60000 });
-  await fs.writeFile(outputPath, file.data);
+  const response = await axios.get(dlUrl, {
+    responseType: "stream",
+    timeout:      DL_TIMEOUT
+  });
+
+  await new Promise((resolve, reject) => {
+    const writer = fs.createWriteStream(outputPath);
+    let   size   = 0;
+    response.data.on("data", chunk => {
+      size += chunk.length;
+      if (size > MAX_BYTES) {
+        response.data.destroy();
+        writer.destroy();
+        reject(new Error("TOO_LARGE"));
+      }
+    });
+    response.data.pipe(writer);
+    writer.on("finish", resolve);
+    writer.on("error",  reject);
+  });
 }
 
 // ─────────────────────────────────────────
-// رسالة معلومات الفيديو
+// تحقق من وجود yt-dlp في النظام
 // ─────────────────────────────────────────
-function buildInfoText(video, qualityLabel) {
+function checkYtDlp() {
+  return new Promise(resolve => {
+    const p = spawn("yt-dlp", ["--version"]);
+    p.on("close", code => resolve(code === 0));
+    p.on("error", ()   => resolve(false));
+  });
+}
+
+// ─────────────────────────────────────────
+// بناء رسالة المعلومات
+// ─────────────────────────────────────────
+function buildInfoText(video, quality, sizeMB) {
   const views    = (video.views || 0).toLocaleString();
-  const duration = video.timestamp  || "غير معروف";
+  const duration = video.timestamp || "غير معروف";
   const channel  = video.author?.name || "غير معروف";
-  const quality  = qualityLabel || "360p";
+  const sizeStr  = sizeMB ? ` — ${sizeMB} MB` : "";
 
   return (
     `🎬 ${video.title}\n` +
     `━━━━━━━━━━━━━━━━━━━━\n` +
-    `📺 القناة   : ${channel}\n` +
-    `⏱️ المدة    : ${duration}\n` +
-    `👁️ المشاهدات: ${views}\n` +
-    `🎞️ الجودة   : ${quality}\n` +
-    `🔗 الرابط   : ${video.url}`
+    `📺 القناة    : ${channel}\n` +
+    `⏱️ المدة     : ${duration}\n` +
+    `👁️ المشاهدات : ${views}\n` +
+    `🎞️ الجودة    : ${quality}p${sizeStr}\n` +
+    `🔗 الرابط    : ${video.url}`
   );
 }
 
 // ─────────────────────────────────────────
-// المنطق الرئيسي للبحث والتنزيل والإرسال
+// المنطق الرئيسي
 // ─────────────────────────────────────────
 async function handleSearch(api, event, rawQuery) {
   const tid = event.threadID;
   const mid = event.messageID;
 
-  // تحليل الاستعلام: "قناة | عنوان"  أو  "عنوان"
+  // تحليل "قناة | عنوان" أو "عنوان"
   let channelHint = null, searchQuery = rawQuery.trim();
   if (rawQuery.includes("|")) {
-    const parts  = rawQuery.split("|");
-    channelHint  = parts[0].trim();
-    searchQuery  = parts.slice(1).join("|").trim();
+    const [ch, ...rest] = rawQuery.split("|");
+    channelHint  = ch.trim();
+    searchQuery  = rest.join("|").trim();
   }
 
   // ── البحث ──
-  const statusMsg = await api.sendMessage(
-    `🔍 جاري البحث عن: "${searchQuery}"${channelHint ? `\n📺 في قناة: "${channelHint}"` : ""}`,
+  const searchMsg = await api.sendMessage(
+    `🔍 جاري البحث عن: "${searchQuery}"` +
+    (channelHint ? `\n📺 القناة: "${channelHint}"` : ""),
     tid
   );
 
   const video = await findBestVideo(searchQuery, channelHint).catch(() => null);
-  try { api.unsendMessage(statusMsg.messageID); } catch (_) {}
+  try { api.unsendMessage(searchMsg.messageID); } catch (_) {}
 
   if (!video) {
-    return api.sendMessage(
-      `❌ لم يُعثر على أي فيديو مطابق لـ: "${searchQuery}"`,
-      tid, mid
-    );
+    return api.sendMessage(`❌ لم يُعثر على فيديو مطابق لـ: "${searchQuery}"`, tid, mid);
   }
+
+  // احسب الجودة المناسبة بناءً على مدة الفيديو
+  const quality = qualityForDuration(video.seconds || 0);
 
   // ── التنزيل ──
   const dlMsg = await api.sendMessage(
-    `⏬ جاري تنزيل الفيديو...\n🎬 ${video.title}`,
+    `⏬ جاري التنزيل (${quality}p)...\n🎬 ${video.title}\n⏱️ المدة: ${video.timestamp || "غير معروف"}`,
     tid
   );
 
-  await fs.ensureDir(CACHE_DIR);
-  const safeName  = `${video.videoId}.mp4`;
-  const filePath  = path.join(CACHE_DIR, safeName);
+  await fs.ensureDir(TMP_DIR);
+  const outputPath = path.join(TMP_DIR, `${video.videoId}_${Date.now()}.mp4`);
 
-  let qualityLabel = "360p";
-  let usedFallback = false;
+  let   success   = false;
+  let   usedQuality = quality;
 
-  try {
-    const { format } = await downloadVideo(video.url, filePath);
-    qualityLabel = format.qualityLabel || "360p";
-  } catch (_) {
+  // ── المحاولة الأولى: yt-dlp ──
+  const ytDlpAvail = await checkYtDlp();
+  if (ytDlpAvail) {
     try {
-      await downloadFallback(video.url, filePath);
-      usedFallback = true;
-    } catch (e2) {
-      try { api.unsendMessage(dlMsg.messageID); } catch (_) {}
-      return api.sendMessage(
-        `❌ فشل تنزيل الفيديو.\n🔗 يمكنك مشاهدته مباشرة:\n${video.url}`,
-        tid, mid
-      );
+      await downloadWithYtDlp(video.url, outputPath, quality);
+      success = true;
+    } catch (e) {
+      if (e.message === "TOO_LARGE") {
+        // جرب جودة أقل
+        const lower = quality === "720" ? "480" : quality === "480" ? "360" : "240";
+        try {
+          await downloadWithYtDlp(video.url, outputPath, lower);
+          usedQuality = lower;
+          success = true;
+        } catch (_) {}
+      }
     }
+  }
+
+  // ── المحاولة الثانية: cobalt.tools ──
+  if (!success) {
+    try {
+      await downloadCobalt(video.url, outputPath, quality);
+      success = true;
+    } catch (_) {}
   }
 
   try { api.unsendMessage(dlMsg.messageID); } catch (_) {}
 
-  // ── الإرسال ──
-  const infoText = buildInfoText(video, usedFallback ? "360p" : qualityLabel);
+  if (!success || !(await fs.pathExists(outputPath))) {
+    return api.sendMessage(
+      `❌ فشل تنزيل الفيديو.\n\n` +
+      `🔗 يمكنك مشاهدته مباشرة:\n${video.url}\n\n` +
+      `💡 تأكد أن yt-dlp مثبت على السيرفر`,
+      tid, mid
+    );
+  }
+
+  // حجم الملف النهائي
+  let sizeMB = null;
+  try {
+    const stat = await fs.stat(outputPath);
+    sizeMB = (stat.size / (1024 * 1024)).toFixed(1);
+
+    // تحقق أخير من الحجم
+    if (stat.size > MAX_BYTES) {
+      await fs.remove(outputPath).catch(() => {});
+      return api.sendMessage(
+        `⚠️ الفيديو كبير جداً بعد التنزيل (${sizeMB} MB).\n` +
+        `الحد الأقصى لفيسبوك هو ${MAX_MB} MB.\n\n` +
+        `🔗 رابط يوتيوب:\n${video.url}`,
+        tid, mid
+      );
+    }
+  } catch (_) {}
+
+  const infoText = buildInfoText(video, usedQuality, sizeMB);
+
   await api.sendMessage(
-    { body: infoText, attachment: fs.createReadStream(filePath) },
+    { body: infoText, attachment: fs.createReadStream(outputPath) },
     tid,
-    () => { fs.remove(filePath).catch(() => {}); },
+    () => { fs.remove(outputPath).catch(() => {}); },
     mid
   );
 }
@@ -194,26 +279,22 @@ module.exports = {
   config: {
     name: "video",
     aliases: ["vid", "v"],
-    version: "2.0",
+    version: "4.0",
     author: "GoatBot",
-    countDown: 10,
+    countDown: 15,
     role: 0,
     shortDescription: "تنزيل فيديو من يوتيوب",
-    longDescription: "يبحث عن أشهر فيديو مطابق في يوتيوب ويرسله مباشرة",
+    longDescription: "يبحث عن أشهر فيديو مطابق ويُنزّله بأعلى جودة ممكنة",
     category: "media",
     guide: {
-      en: "{pn} <عنوان الفيديو>\n"
-        + "{pn} <اسم القناة> | <عنوان الفيديو>\n"
-        + "أو اكتب {pn} وحده وسيطلب منك الاستعلام"
+      en: "{pn} <عنوان>\n{pn} <قناة> | <عنوان>\nأو {pn} وحده للكتابة التفاعلية"
     }
   },
 
-  // ── الأمر ──
   onStart: async function ({ api, event, args }) {
     const tid = event.threadID;
     const mid = event.messageID;
 
-    // إذا لم يُعطَ استعلام → اطلبه عبر onReply
     if (!args.length) {
       const prompt = await api.sendMessage(
         `🎬 أرسل عنوان الفيديو الذي تريده.\n\n` +
@@ -221,7 +302,7 @@ module.exports = {
         `• عنوان الفيديو فقط\n` +
         `• اسم القناة | عنوان الفيديو\n\n` +
         `مثال: MrBeast | Extreme Survival\n` +
-        `مثال: شاهد نت | مسلسل`,
+        `مثال: شاهد نت | مسلسل النهاية`,
         tid, mid
       );
 
@@ -236,7 +317,6 @@ module.exports = {
     await handleSearch(api, event, args.join(" "));
   },
 
-  // ── الرد على طلب الاستعلام ──
   onReply: async function ({ api, event, Reply }) {
     if (event.senderID !== Reply.author) return;
 
@@ -244,9 +324,12 @@ module.exports = {
     try { api.unsendMessage(event.messageReply.messageID); } catch (_) {}
 
     if (Reply.type === "awaitQuery") {
-      const query = event.body?.trim();
+      const query = (event.body || "").trim();
       if (!query) {
-        return api.sendMessage("❌ لم تكتب شيئاً. أعد المحاولة بكتابة /video", event.threadID, event.messageID);
+        return api.sendMessage(
+          "❌ لم تكتب شيئاً. أعد المحاولة بكتابة /video",
+          event.threadID, event.messageID
+        );
       }
       await handleSearch(api, event, query);
     }
