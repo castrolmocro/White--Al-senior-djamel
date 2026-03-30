@@ -1,7 +1,7 @@
 {
   "facebookAccount": {
-    "email": "castrolmocro@gmail.com",
-    "password": "Djamel2025*//",
+    "email": "",
+    "password": "",
     "2FASecret": "",
     "i_user": "",
     "proxy": null,
@@ -23,6 +23,14 @@
     "61583739652803",
     " "
   ],
+  "humanTyping": {
+    "enable": true,
+    "minDelay": 800,
+    "maxDelay": 4500,
+    "charsPerSecond": 14,
+    "jitterPercent": 25,
+    "notes": "Simulates human typing before every bot reply. minDelay/maxDelay in ms. charsPerSecond controls how fast the bot 'types'. jitterPercent adds randomness."
+  },
   "reactUnsend": {
     "enable": true,
     "onlyAdmin": true,
