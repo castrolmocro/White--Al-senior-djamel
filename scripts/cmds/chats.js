@@ -54,34 +54,65 @@ function setReply(api, event, commandName, info, replyData) {
   });
 }
 
-async function safeGetThreadList(api, limit, cursor, tags) {
+// ─── جلب قائمة المحادثات مع timeout لمنع التجمد ──────────────────────────────
+
+function withTimeout(promise, ms = 15000) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), ms))
+  ]);
+}
+
+async function safeGetThreadList(api, limit, timestamp, tags) {
   try {
-    const result = await api.getThreadList(limit, cursor, tags);
+    const result = await withTimeout(api.getThreadList(limit, timestamp || null, tags), 15000);
     if (Array.isArray(result)) return result;
     if (result?.data) return result.data;
     return [];
   } catch (_) { return []; }
 }
 
-// ─── جلب كل الغروبات (مع pagination) ─────────────────────────────────────────
+// ─── جلب كل الغروبات بطريقة آمنة ────────────────────────────────────────────
 
 async function getAllGroups(api) {
   let groups = [];
-  let cursor = null;
-  let pages = 0;
-  while (pages < 5) {
-    const batch = await safeGetThreadList(api, 50, cursor, ["INBOX"]);
-    if (!batch.length) break;
-    const batchGroups = batch.filter(t => t && t.isGroup && t.threadID);
-    groups = groups.concat(batchGroups);
-    const lastItem = batch[batch.length - 1];
-    if (!lastItem || batch.length < 50) break;
-    cursor = lastItem.timestamp || null;
-    if (!cursor) break;
-    pages++;
-    await new Promise(r => setTimeout(r, 300));
+
+  // محاولة 1: INBOX بدون cursor
+  try {
+    const batch1 = await withTimeout(api.getThreadList(100, null, ["INBOX"]), 18000);
+    const list1 = Array.isArray(batch1) ? batch1 : (batch1?.data || []);
+    const g1 = list1.filter(t => t && t.isGroup && t.threadID);
+    groups = groups.concat(g1);
+
+    // محاولة 2: إذا جاءت 100 نتيجة، جرب صفحة ثانية
+    if (list1.length >= 100) {
+      const lastTs = list1[list1.length - 1]?.timestamp;
+      if (lastTs) {
+        await new Promise(r => setTimeout(r, 500));
+        const batch2 = await withTimeout(api.getThreadList(100, lastTs, ["INBOX"]), 18000);
+        const list2 = Array.isArray(batch2) ? batch2 : (batch2?.data || []);
+        const g2 = list2.filter(t => t && t.isGroup && t.threadID);
+        groups = groups.concat(g2);
+      }
+    }
+  } catch (_) {}
+
+  // محاولة احتياطية: بدون تاج (بعض الإصدارات لا تدعم INBOX)
+  if (!groups.length) {
+    try {
+      const fallback = await withTimeout(api.getThreadList(60, null, []), 18000);
+      const list = Array.isArray(fallback) ? fallback : (fallback?.data || []);
+      groups = list.filter(t => t && t.isGroup && t.threadID);
+    } catch (_) {}
   }
-  return groups;
+
+  // إزالة التكرار
+  const seen = new Set();
+  return groups.filter(g => {
+    if (seen.has(g.threadID)) return false;
+    seen.add(g.threadID);
+    return true;
+  });
 }
 
 // ─── تنفيذ أمر عن بُعد في غروب آخر ──────────────────────────────────────────
