@@ -1,147 +1,130 @@
-const intervalMap = new Map();
+// ===================================================
+//   /protect — حماية الكُنيات فقط
+//   • أدمن البوت يغيّر الكُنية → تُحفظ تلقائياً
+//   • أي شخص آخر يغيّر الكُنية → تُعاد للمحفوظة
+// ===================================================
+
+function isBotAdmin(id) {
+  const admins = global.GoatBot.config.adminBot || [];
+  return admins.includes(String(id)) || admins.includes(id);
+}
 
 module.exports = {
   config: {
     name: "protect",
-    version: "1.3",
-    author: "MOHAMMAD AKASH + edit",
-    role: 1,
-    shortDescription: "Lock group name, nickname, theme, emoji",
+    version: "2.0",
+    author: "Djamel",
+    role: 2,
+    shortDescription: "حماية كُنيات أعضاء المجموعة",
     category: "group",
-    guide: "{pn} on/off"
+    guide: {
+      en: "{pn} on           — تفعيل الحماية\n" +
+          "{pn} off          — إيقاف الحماية\n" +
+          "{pn} set @شخص كُنية — ضبط كُنية عضو\n" +
+          "{pn} list         — عرض الكُنيات المحفوظة"
+    }
   },
 
   onStart: async ({ api, event, message, threadsData, args }) => {
-    const { threadID } = event;
+    const { threadID, mentions } = event;
 
-    if (!args[0]) return message.reply("⚠️ Usage: /protect on | /protect off");
-
+    // ─── تفعيل ─────────────────────────────────────────────────────────
     if (args[0] === "on") {
-      const info = await api.getThreadInfo(threadID);
+      const info = await api.getThreadInfo(threadID).catch(() => null);
+      if (!info) return message.reply("❌ تعذّر جلب معلومات المجموعة.");
 
-      const protectData = {
-        enable: true,
-        name: info.threadName || "",
-        emoji: info.emoji || "",
-        color: info.color || "",
-        nickname: {}
-      };
-
-      const members = info.members || [];
-      members.forEach(u => {
-        protectData.nickname[u.userID] = u.nickname || "";
+      const nicknames = {};
+      (info.members || []).forEach(u => {
+        nicknames[u.userID] = u.nickname || "";
       });
 
-      await threadsData.set(threadID, protectData, "data.protect");
-
-      //  تشغيل كل 5 ثواني
-      if (intervalMap.has(threadID)) clearInterval(intervalMap.get(threadID));
-
-      const interval = setInterval(async () => {
-        const data = await threadsData.get(threadID, "data.protect");
-        if (!data?.enable) return;
-
-        const current = await api.getThreadInfo(threadID);
-
-        // NAME
-        if (current.threadName !== data.name) {
-          api.setTitle(data.name, threadID);
-        }
-
-        // EMOJI
-        if (current.emoji !== data.emoji) {
-          api.changeThreadEmoji(data.emoji, threadID);
-        }
-
-        // COLOR
-        if (current.color !== data.color) {
-          api.changeThreadColor(data.color, threadID);
-        }
-
-        // NICKNAMES
-        const membersNow = current.members || [];
-        membersNow.forEach(u => {
-          const savedNick = data.nickname[u.userID] || "";
-          if ((u.nickname || "") !== savedNick) {
-            api.changeNickname(savedNick, threadID, u.userID);
-          }
-        });
-
-      }, 5000); // كل 5 ثواني
-
-      intervalMap.set(threadID, interval);
+      await threadsData.set(threadID, { enable: true, nicknames }, "data.protect");
 
       return message.reply(
-        "🛡 𝗣𝗥𝗢𝗧𝗘𝗖𝗧 𝗘𝗡𝗔𝗕𝗟𝗘𝗗\n⏱ Auto-check every 5 seconds!"
+        "🛡️ تم تفعيل حماية الكُنيات!\n" +
+        `📋 تم حفظ كُنيات ${Object.keys(nicknames).length} عضو.\n\n` +
+        "• أدمن البوت يمكنه تغيير الكُنيات بحرية.\n" +
+        "• أي شخص آخر سيتم إعادة كُنيته تلقائياً."
       );
     }
 
+    // ─── إيقاف ─────────────────────────────────────────────────────────
     if (args[0] === "off") {
-      await threadsData.set(threadID, {}, "data.protect");
-
-      //  إيقاف التايمر
-      if (intervalMap.has(threadID)) {
-        clearInterval(intervalMap.get(threadID));
-        intervalMap.delete(threadID);
-      }
-
-      return message.reply(
-        "🔓 𝗣𝗥𝗢𝗧𝗘𝗖𝗧 𝗗𝗜𝗦𝗔𝗕𝗟𝗘𝗗"
-      );
+      await threadsData.set(threadID, { enable: false, nicknames: {} }, "data.protect");
+      return message.reply("🔓 تم إيقاف حماية الكُنيات.");
     }
+
+    // ─── ضبط كُنية يدوياً ──────────────────────────────────────────────
+    if (args[0] === "set") {
+      const targetID = Object.keys(mentions || {})[0];
+      if (!targetID) return message.reply("⚠️ حدد الشخص بالإشارة إليه: /protect set @شخص كُنيته");
+
+      const nickname = args.slice(2).join(" ").trim();
+      if (!nickname) return message.reply("⚠️ أرسل الكُنية بعد اسم الشخص.");
+
+      const protect = await threadsData.get(threadID, "data.protect");
+      if (!protect?.enable) return message.reply("⚠️ الحماية غير مفعّلة. شغّلها أولاً بـ /protect on");
+
+      // تغيير الكُنية
+      await api.changeNickname(nickname, threadID, targetID).catch(() => {});
+      await threadsData.set(threadID, nickname, `data.protect.nicknames.${targetID}`);
+
+      return message.reply(`✅ تم ضبط كُنية الشخص إلى: "${nickname}" وحفظها.`);
+    }
+
+    // ─── عرض القائمة ───────────────────────────────────────────────────
+    if (args[0] === "list") {
+      const protect = await threadsData.get(threadID, "data.protect");
+      if (!protect?.enable) return message.reply("⚠️ الحماية غير مفعّلة.");
+
+      const nicks = protect.nicknames || {};
+      const entries = Object.entries(nicks).filter(([, v]) => v);
+      if (!entries.length) return message.reply("📋 لا توجد كُنيات مضبوطة حالياً.");
+
+      let msg = `📋 الكُنيات المحمية (${entries.length}):\n━━━━━━━━━━━━━━━\n`;
+      entries.forEach(([id, nick]) => {
+        msg += `• ${nick}  (${id})\n`;
+      });
+      return message.reply(msg);
+    }
+
+    return message.reply(
+      "⚙️ الاستخدام:\n" +
+      "• /protect on — تفعيل\n" +
+      "• /protect off — إيقاف\n" +
+      "• /protect set @شخص كُنية — ضبط كُنية\n" +
+      "• /protect list — عرض الكُنيات"
+    );
   },
 
+  // ─── مراقبة تغيير الكُنيات ─────────────────────────────────────────────
   onEvent: async ({ api, event, threadsData }) => {
     const { threadID, author, logMessageType, logMessageData } = event;
-    const protectData = await threadsData.get(threadID, "data.protect");
-    if (!protectData?.enable) return;
 
-    const info = await api.getThreadInfo(threadID);
-    const isAdmin = info.adminIDs.some(e => e.id === author);
-    const isBot = api.getCurrentUserID() === author;
+    // فقط نتفاعل مع تغيير الكُنيات
+    if (logMessageType !== "log:user-nickname") return;
 
-    if (!isAdmin && !isBot) {
-      if (logMessageType === "log:thread-name") {
-        api.setTitle(protectData.name, threadID);
-      }
+    const protect = await threadsData.get(threadID, "data.protect");
+    if (!protect?.enable) return;
 
-      if (logMessageType === "log:thread-icon") {
-        api.changeThreadEmoji(protectData.emoji, threadID);
-      }
+    const { participant_id, nickname } = logMessageData;
+    const botID = api.getCurrentUserID();
 
-      if (logMessageType === "log:thread-color") {
-        api.changeThreadColor(protectData.color, threadID);
-      }
+    // البوت نفسه غيّر الكُنية — لا نتدخل
+    if (String(author) === String(botID)) return;
 
-      if (logMessageType === "log:user-nickname") {
-        const { participant_id } = logMessageData;
-        api.changeNickname(
-          protectData.nickname[participant_id] || "",
-          threadID,
-          participant_id
-        );
-      }
+    // أدمن البوت غيّر الكُنية → احفظها تلقائياً
+    if (isBotAdmin(author)) {
+      await threadsData.set(
+        threadID,
+        nickname || "",
+        `data.protect.nicknames.${participant_id}`
+      );
+      return;
     }
 
-    // حفض الاسم والكنيات لو ادمن البوت غيرهم
-    if (isAdmin) {
-      if (logMessageType === "log:thread-name") {
-        await threadsData.set(threadID, logMessageData.name || "", "data.protect.name");
-      }
-      if (logMessageType === "log:thread-icon") {
-        await threadsData.set(threadID, logMessageData.thread_icon || "", "data.protect.emoji");
-      }
-      if (logMessageType === "log:thread-color") {
-        await threadsData.set(threadID, logMessageData.theme_id || "", "data.protect.color");
-      }
-      if (logMessageType === "log:user-nickname") {
-        const { participant_id, nickname } = logMessageData;
-        await threadsData.set(
-          threadID,
-          nickname || "",
-          `data.protect.nickname.${participant_id}`
-        );
-      }
-    }
+    // شخص عادي حاول التغيير → أعد الكُنية المحفوظة
+    const savedNick = protect.nicknames?.[participant_id] ?? "";
+    await api.changeNickname(savedNick, threadID, participant_id).catch(() => {});
   }
 };
