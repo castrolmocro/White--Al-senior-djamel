@@ -21,15 +21,18 @@ function saveLockData(data) {
   }
 }
 
+// تحميل البيانات المحفوظة عند تشغيل البوت
 if (!global.GoatBot._lockDataLoaded) {
+  if (!global.GoatBot.lockedThreads) global.GoatBot.lockedThreads = {};
   const savedData = loadLockData();
   Object.assign(global.GoatBot.lockedThreads, savedData);
   global.GoatBot._lockDataLoaded = true;
 }
 
-const lockedThreads = global.GoatBot.lockedThreads;
-
-function isBotAdmin(senderID) {
+// ===================================================
+//   دالة التحقق من أدمن البوت فقط
+// ===================================================
+function isAdmin(senderID) {
   const adminBot = global.GoatBot.config.adminBot || [];
   return adminBot.includes(String(senderID)) || adminBot.includes(senderID);
 }
@@ -37,80 +40,79 @@ function isBotAdmin(senderID) {
 module.exports = {
   config: {
     name: "lock",
-    version: "4.1",
-    author: "MOHAMMAD AKASH | Modified",
+    version: "5.0",
+    author: "MOHAMMAD AKASH",
     countDown: 5,
     role: 1,
-    description: "Lock/unlock group — only bot admins can send messages when locked. State persists across bot restarts.",
+    description: "قفل/فتح المجموعة — فقط الأدمن يمكنه استخدام البوت عند القفل",
     category: "box chat",
   },
 
   onStart: async function ({ api, event, args, threadsData }) {
     const { threadID, senderID } = event;
 
-    const info = await api.getThreadInfo(threadID);
-    const groupAdminIDs = info.adminIDs.map((i) => i.id);
-
-    if (!groupAdminIDs.includes(String(senderID)) && !isBotAdmin(senderID)) {
-      return api.sendMessage(
-        "❌ Only group admins or bot admins can use this command!",
-        threadID
-      );
+    if (!isAdmin(senderID)) {
+      return api.sendMessage("❌ هذا الأمر للأدمن فقط!", threadID);
     }
 
-    const action = args[0]?.toLowerCase();
+    const lockedThreads = global.GoatBot.lockedThreads;
+    const action = (args[0] || "").toLowerCase();
 
     if (action === "on" || action === "lock") {
       if (lockedThreads[threadID])
-        return api.sendMessage("✅ Group is already locked!", threadID);
+        return api.sendMessage("🔒 المجموعة مقفلة بالفعل!", threadID);
 
       lockedThreads[threadID] = true;
       saveLockData(lockedThreads);
 
-      // إخفاء رسالة "command not found" في هذا الغروب
-      try {
-        await threadsData.set(threadID, { commandNotFound: true }, "settings.hideNotiMessage");
-      } catch (_) {}
-
       return api.sendMessage(
-        "🔒 Group locked!\nOnly bot admins can send messages now.\nAll other messages will be deleted automatically.",
+        "🔒 تم قفل المجموعة!\n" +
+        "البوت سيتجاهل جميع الرسائل والأوامر تلقائياً.\n" +
+        "فقط الأدمن يمكنه استخدام البوت الآن.",
         threadID
       );
     }
 
     if (action === "off" || action === "unlock") {
       if (!lockedThreads[threadID])
-        return api.sendMessage("✅ Group is already unlocked!", threadID);
+        return api.sendMessage("🔓 المجموعة مفتوحة بالفعل!", threadID);
 
       delete lockedThreads[threadID];
       saveLockData(lockedThreads);
 
-      // إعادة رسالة "command not found" في هذا الغروب
-      try {
-        await threadsData.set(threadID, {}, "settings.hideNotiMessage");
-      } catch (_) {}
-
       return api.sendMessage(
-        "🔓 Group unlocked!\nEveryone can send messages again.",
+        "🔓 تم فتح المجموعة!\n" +
+        "يمكن للجميع استخدام البوت الآن.",
+        threadID
+      );
+    }
+
+    if (action === "status") {
+      const isLocked = !!lockedThreads[threadID];
+      return api.sendMessage(
+        `📊 حالة المجموعة: ${isLocked ? "🔒 مقفلة" : "🔓 مفتوحة"}`,
         threadID
       );
     }
 
     return api.sendMessage(
-      "❌ Usage:\n/lock on  — lock the group\n/lock off — unlock the group",
+      "⚙️ طريقة الاستخدام:\n" +
+      "• /lock on — قفل المجموعة\n" +
+      "• /lock off — فتح المجموعة\n" +
+      "• /lock status — معرفة الحالة",
       threadID
     );
   },
 
+  // حذف رسائل غير الأدمن عند القفل
   onEvent: async function ({ api, event }) {
     const { threadID, senderID, messageID } = event;
-
-    if (!lockedThreads[threadID]) return;
-
-    if (isBotAdmin(senderID)) return;
+    if (!global.GoatBot.lockedThreads?.[threadID]) return;
 
     const botID = global.GoatBot.botID || global.botID;
-    if (senderID === botID || String(senderID) === String(botID)) return;
+    if (String(senderID) === String(botID)) return;
+
+    if (isAdmin(senderID)) return;
 
     try {
       await api.unsendMessage(messageID);
