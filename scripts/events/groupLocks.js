@@ -1,105 +1,69 @@
 module.exports = {
   config: {
     name: "groupLocks",
-    version: "2.0",
-    author: "GoatBot",
-    description: "يراقب تغييرات اسم المجموعة والكنيات ويُعيدها أو يحفظها حسب صلاحية المُغيِّر",
+    version: "3.0",
+    author: "Djamel",
+    description: "يراقب تغيير الكُنيات ويعيدها أو يحفظها حسب صلاحية أدمن البوت",
     category: "events"
   },
 
   onStart: async ({ api, event, threadsData }) => {
-    const watchedTypes = ["log:thread-name", "log:user-nickname"];
-    if (!watchedTypes.includes(event.logMessageType)) return;
+    // نتفاعل فقط مع تغيير الكُنيات
+    if (event.logMessageType !== "log:user-nickname") return;
 
-    const { threadID, logMessageType, logMessageData, senderID } = event;
-    const botID = String(global.GoatBot?.botID || "");
+    const { threadID, logMessageData, senderID } = event;
+    const botID  = String(global.GoatBot?.botID || "");
     const sender = String(senderID || "");
 
-    // تجاهل إذا كان البوت نفسه هو من قام بالتغيير (لتجنب الحلقة اللانهائية)
+    // تجاهل إذا كان البوت نفسه من غيّر (لتجنب الحلقة اللانهائية)
     if (sender === botID) return;
 
-    let tData, locks;
+    let locks;
     try {
-      tData = await threadsData.get(threadID);
+      const tData = await threadsData.get(threadID);
       locks = tData?.groupLocks || {};
     } catch (_) { return; }
 
-    // هل المُغيِّر أدمن في المجموعة؟
-    const adminIDs = (tData?.adminIDs || []).map(a => String(a.id || a));
-    const senderIsAdmin = adminIDs.includes(sender);
+    // إذا لم يكن قفل الكُنيات مفعّلاً → لا شيء
+    if (!locks.lockNick) return;
 
-    // ════════════════════════════════════════
-    // ── قفل اسم المجموعة ──
-    // ════════════════════════════════════════
-    if (logMessageType === "log:thread-name" && locks.lockName) {
-      const newName = logMessageData?.name || "";
+    const { participant_id, nickname } = logMessageData || {};
+    if (!participant_id) return;
 
-      if (senderIsAdmin) {
-        // الأدمن غيّر الاسم → احفظه كاسم محمي جديد
-        if (newName !== locks.lockedName) {
-          locks.lockedName = newName;
-          try {
-            await threadsData.set(threadID, locks, "groupLocks");
-            await api.sendMessage(
-              `✅ تم تحديث الاسم المحمي إلى:\n"${newName}"\nأي شخص آخر يغيّره سيُعاد تلقائياً.`,
-              threadID
-            );
-          } catch (_) {}
-        }
-      } else {
-        // عضو عادي غيّر الاسم → أعِده للاسم المحمي
-        const savedName = locks.lockedName;
-        if (!savedName || newName === savedName) return;
+    if (!locks.protectedNicks) locks.protectedNicks = {};
 
-        setTimeout(async () => {
-          try {
-            await api.setTitle(savedName, threadID);
-            await api.sendMessage(
-              `🔒 تم إعادة اسم المجموعة تلقائياً.\nالاسم محمي ولا يمكن تغييره.\nللتعديل استخدم: groupinfo setname`,
-              threadID
-            );
-          } catch (_) {}
-        }, 1500);
+    const newNick  = nickname || "";
+    const savedNick = locks.protectedNicks[participant_id] ?? "";
+
+    // هل المُغيِّر أدمن البوت؟
+    const adminBot = global.GoatBot.config.adminBot || [];
+    const senderIsBotAdmin = adminBot.includes(sender) || adminBot.includes(senderID);
+
+    if (senderIsBotAdmin) {
+      // أدمن البوت غيّر الكُنية → احفظها تلقائياً
+      if (newNick !== savedNick) {
+        locks.protectedNicks[participant_id] = newNick;
+        try {
+          await threadsData.set(threadID, locks, "groupLocks");
+          const msg = newNick
+            ? `✅ تم حفظ الكُنية المحمية:\n"${newNick}"`
+            : `✅ تم مسح الكُنية المحمية لهذا العضو.`;
+          await api.sendMessage(msg, threadID);
+        } catch (_) {}
       }
-    }
+    } else {
+      // شخص عادي حاول التغيير → أعِد الكُنية المحفوظة
+      if (newNick === savedNick) return;
 
-    // ════════════════════════════════════════
-    // ── قفل الكنيات ──
-    // ════════════════════════════════════════
-    if (logMessageType === "log:user-nickname" && locks.lockNick) {
-      const { participant_id, nickname } = logMessageData || {};
-      if (!participant_id) return;
-
-      const newNick = nickname || "";
-      if (!locks.protectedNicks) locks.protectedNicks = {};
-      const savedNick = locks.protectedNicks[participant_id] ?? "";
-
-      if (senderIsAdmin) {
-        // الأدمن غيّر الكنية → احفظها كـ"كنية محمية" لهذا العضو
-        if (newNick !== savedNick) {
-          locks.protectedNicks[participant_id] = newNick;
-          try {
-            await threadsData.set(threadID, locks, "groupLocks");
-            const msg = newNick
-              ? `✅ تم حفظ كنية العضو كـ"محمية":\n"${newNick}"\nأي تغيير من عضو آخر سيُعاد تلقائياً.`
-              : `✅ تم مسح الكنية المحمية لهذا العضو.\nكنيته ستبقى فارغة وتُعاد إذا غيّرها.`;
-            await api.sendMessage(msg, threadID);
-          } catch (_) {}
-        }
-      } else {
-        // عضو عادي غيّر كنيته → أعِدها للقيمة المحمية
-        if (newNick === savedNick) return;
-
-        setTimeout(async () => {
-          try {
-            await api.changeNickname(savedNick, threadID, participant_id);
-            const msg = savedNick
-              ? `🔒 تم إعادة الكنية المحمية تلقائياً:\n"${savedNick}"`
-              : `🔒 تم حذف الكنية تلقائياً.\nالكنيات مقفلة في هذه المجموعة.`;
-            await api.sendMessage(msg, threadID);
-          } catch (_) {}
-        }, 1500);
-      }
+      setTimeout(async () => {
+        try {
+          await api.changeNickname(savedNick, threadID, participant_id);
+          const msg = savedNick
+            ? `🔒 تم إعادة الكُنية المحمية:\n"${savedNick}"`
+            : `🔒 تم حذف الكُنية تلقائياً.\nالكُنيات مقفلة في هذه المجموعة.`;
+          await api.sendMessage(msg, threadID);
+        } catch (_) {}
+      }, 1500);
     }
   }
 };
