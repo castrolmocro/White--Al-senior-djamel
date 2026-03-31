@@ -44,7 +44,7 @@ module.exports = {
 
     // تحقق من حالة lockdown للمجموعة
     const settings = loadSettings();
-    if (settings[threadID] === false) return; // مُعطَّل لهذه المجموعة
+    if (!settings[threadID]) return; // يعمل فقط إذا تم تفعيله صراحةً بـ /lockdown on
 
     const userName = await usersData.getName(leftID);
     const msg = buildMessage(userName);
