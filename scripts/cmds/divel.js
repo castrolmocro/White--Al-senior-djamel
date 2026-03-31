@@ -83,21 +83,21 @@ module.exports = {
 
   // ─── يُستدعى عند كل رسالة في أي غروب ────────────────────────────────────────
   onChat: async function ({ api, event }) {
-    const { threadID, senderID, type } = event;
+    const { threadID, senderID } = event;
 
-    // فقط للرسائل (بما فيها الصامت) وليس لأحداث غيرها
-    if (type !== "message" && type !== "message_reply") return;
+    // تجاهل إذا لم يكن هناك محتوى حقيقي (رسائل log أو أحداث النظام)
+    if (!event.body && !(event.attachments && event.attachments.length)) return;
 
-    // تجاهل رسائل البوت نفسه
+    // تجاهل رسائل البوت نفسه بشكل موثوق
     try {
-      const botID = api.getCurrentUserID();
-      if (String(senderID) === String(botID)) return;
+      const botID = String(api.getCurrentUserID() || "");
+      if (botID && String(senderID) === botID) return;
     } catch (_) {}
 
     restoreWatchers();
 
     const watcher = global.GoatBot.divelWatchers[threadID];
-    if (!watcher || !watcher.active) return;
+    if (!watcher || !watcher.active || !watcher.message) return;
 
     // إعادة ضبط المؤقت (debounce)
     if (watcher.timer) {
@@ -105,12 +105,17 @@ module.exports = {
       watcher.timer = null;
     }
 
-    const ms = (watcher.waitMinutes || 5) * 60 * 1000;
+    const ms  = (watcher.waitMinutes || 5) * 60 * 1000;
+    const tid = threadID;
+    const msg = watcher.message; // نسخ القيمة لتجنب المرجع القديم
 
     watcher.timer = setTimeout(async () => {
-      watcher.timer = null;
+      // تحقق أن الـ watcher لا يزال نشطاً قبل الإرسال
+      const w = global.GoatBot.divelWatchers[tid];
+      if (!w || !w.active) return;
+      w.timer = null;
       try {
-        await api.sendMessage(watcher.message, threadID);
+        await api.sendMessage({ body: msg, isDaydreamMode: true }, tid);
       } catch (err) {
         global.utils?.log?.err?.("DIVEL", "Failed to send message", err);
       }
@@ -135,122 +140,72 @@ module.exports = {
 
     switch (action) {
 
-      // ── تحديد الرسالة
       case "change": {
         const newMsg = args.slice(1).join(" ").trim();
-        if (!newMsg) {
-          return message.reply(
-            "❌ اكتب الرسالة بعد الأمر.\n\nمثال:\n/divel change هيا تكلموا ما هذا الصمت! 👿"
-          );
-        }
+        if (!newMsg) return message.reply("اكتب الرسالة بعد الأمر.");
         td.message = newMsg;
         saveData(data);
         if (global.GoatBot.divelWatchers[threadID]) {
           global.GoatBot.divelWatchers[threadID].message = newMsg;
         }
-        return message.reply(`✅ تم تحديث الرسالة!\n\n📝 الرسالة الجديدة:\n"${newMsg}"`);
+        return message.reply(`تم حفظ الرسالة: "${newMsg}"`);
       }
 
-      // ── تحديد وقت الانتظار
       case "time": {
         const mins = parseFloat(args[1]);
-        if (isNaN(mins) || mins <= 0) {
-          return message.reply(
-            "❌ اكتب عدد الدقائق.\n\nمثال:\n/divel time 5"
-          );
-        }
+        if (isNaN(mins) || mins <= 0) return message.reply("اكتب عدد الدقائق.");
         td.waitMinutes = mins;
         saveData(data);
         const watcher = global.GoatBot.divelWatchers[threadID];
         if (watcher) {
           watcher.waitMinutes = mins;
-          if (watcher.timer) {
-            clearTimeout(watcher.timer);
-            watcher.timer = null;
-          }
+          if (watcher.timer) { clearTimeout(watcher.timer); watcher.timer = null; }
         }
-        return message.reply(
-          `✅ وقت الانتظار: ${mins} دقيقة\n`
-          + `💡 بعد كل رسالة من أي شخص في الغروب يعدّ ${mins} دقيقة ثم يرسل.`
-        );
+        return message.reply(`تم ضبط وقت الانتظار: ${mins} دقيقة`);
       }
 
-      // ── تفعيل
       case "on": {
-        if (!td.message) {
-          return message.reply(
-            "❌ لم تحدد الرسالة بعد.\n\nضع رسالة أولاً:\n/divel change [رسالتك]"
-          );
-        }
-
-        if (global.GoatBot.divelWatchers[threadID]?.active) {
-          return message.reply("⚠️ Divel مفعّل بالفعل في هذا الغروب.");
-        }
-
+        if (!td.message) return message.reply("حدد الرسالة أولاً: /divel change [رسالتك]");
+        if (global.GoatBot.divelWatchers[threadID]?.active) return message.reply("Divel مفعّل بالفعل.");
         td.active = true;
         saveData(data);
-
         global.GoatBot.divelWatchers[threadID] = {
           active: true,
           message: td.message,
           waitMinutes: td.waitMinutes || 5,
           timer: null
         };
-
-        return message.reply(
-          `✅ تم تفعيل Divel! \n\n`
-          + `📝 الرسالة: "${td.message}"\n`
-          + `⏱️ الانتظار: ${td.waitMinutes} دقيقة بعد آخر رسالة\n\n`
-          + `👁️ يراقب المحادثة الآن...`
-        );
+        return message.reply("تم تفعيل Divel.");
       }
 
-      // ── إيقاف
       case "off": {
         const watcher = global.GoatBot.divelWatchers[threadID];
-        if (!watcher?.active) {
-          return message.reply("⚠️ Divel غير مفعّل في هذا الغروب.");
-        }
-        if (watcher.timer) {
-          clearTimeout(watcher.timer);
-        }
+        if (!watcher?.active) return message.reply("Divel غير مفعّل.");
+        if (watcher.timer) clearTimeout(watcher.timer);
         delete global.GoatBot.divelWatchers[threadID];
         td.active = false;
         saveData(data);
-        return message.reply("✅ تم إيقاف Divel في هذا الغروب.");
+        return message.reply("تم إيقاف Divel.");
       }
 
-      // ── الحالة
       case "status": {
         const watcher = global.GoatBot.divelWatchers[threadID];
-        const isActive = watcher?.active || false;
-        const hasTimer = !!watcher?.timer;
         return message.reply(
-          `😈 حالة Divel\n`
-          + `━━━━━━━━━━━━━━━━━━\n`
-          + `▪️ الحالة: ${isActive ? "🟢 مفعّل" : "🔴 موقوف"}\n`
-          + `▪️ الرسالة: ${td.message ? `"${td.message}"` : "غير محددة"}\n`
-          + `▪️ وقت الانتظار: ${td.waitMinutes} دقيقة\n`
-          + `▪️ المؤقت: ${hasTimer ? "⏳ يعدّ الآن" : "⏸️ في انتظار رسالة"}`
+          `الحالة: ${watcher?.active ? "مفعّل" : "موقوف"}\n`
+          + `الرسالة: ${td.message ? `"${td.message}"` : "غير محددة"}\n`
+          + `وقت الانتظار: ${td.waitMinutes} دقيقة`
         );
       }
 
-      // ── مساعدة
-      default: {
+      default:
         return message.reply(
-          "😈 أوامر Divel:\n"
-          + "━━━━━━━━━━━━━━━━━━\n"
-          + "/divel change [رسالة] — تحديد الرسالة\n"
-          + "/divel time [دقائق] — وقت الانتظار\n"
-          + "/divel on — تفعيل\n"
-          + "/divel off — إيقاف\n"
-          + "/divel status — الحالة\n\n"
-          + "💡 مثال:\n"
-          + "/divel change \n"
-          + "/divel time 5\n"
-          + "/divel on\n\n"
+          "الأوامر:\n"
+          + "/divel change [رسالة]\n"
+          + "/divel time [دقائق]\n"
+          + "/divel on\n"
+          + "/divel off\n"
+          + "/divel status"
         );
-      }
     }
   }
 };
