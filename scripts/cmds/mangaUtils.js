@@ -155,14 +155,41 @@ const MangaDex = {
   },
 
   async getImages(chapterId) {
+    const servers = [
+      "https://api.mangadex.org",
+      "https://api.mangadex.network"
+    ];
     for (let i = 0; i < 3; i++) {
       try {
         const res = await httpGet(`${this.base}/at-home/server/${chapterId}`);
         const { baseUrl, chapter } = res.data;
-        if (!chapter?.data?.length) throw new Error("no pages");
-        return { urls: chapter.data.map(f => `${baseUrl}/data/${chapter.hash}/${f}`), referer: "https://mangadex.org" };
-      } catch (e) { if (i === 2) throw e; await new Promise(r => setTimeout(r, 1500)); }
+        if (!chapter) throw new Error("no chapter data");
+
+        // جرب data أولاً، ثم dataSaver كاحتياط
+        const pages = chapter.data?.length ? chapter.data : (chapter.dataSaver || []);
+        if (!pages.length) throw new Error("no pages");
+
+        const quality = chapter.data?.length ? "data" : "data-saver";
+        const urls = pages.map(f => `${baseUrl}/${quality}/${chapter.hash}/${f}`);
+        return { urls, referer: "https://mangadex.org" };
+      } catch (e) {
+        if (i === 2) throw new Error(`MDX: ${e.message}`);
+        await new Promise(r => setTimeout(r, 1500));
+      }
     }
+  },
+
+  // جلب صور بجودة منخفضة (data-saver) إذا فشل الأصلي
+  async getImagesSaver(chapterId) {
+    try {
+      const res = await httpGet(`${this.base}/at-home/server/${chapterId}`);
+      const { baseUrl, chapter } = res.data;
+      if (!chapter) throw new Error("no chapter data");
+      const pages = chapter.dataSaver?.length ? chapter.dataSaver : (chapter.data || []);
+      if (!pages.length) throw new Error("no pages in saver");
+      const quality = chapter.dataSaver?.length ? "data-saver" : "data";
+      return { urls: pages.map(f => `${baseUrl}/${quality}/${chapter.hash}/${f}`), referer: "https://mangadex.org" };
+    } catch (e) { throw new Error(`MDX-saver: ${e.message}`); }
   }
 };
 
@@ -545,26 +572,48 @@ const Webtoons = {
 };
 
 // ─── Chapter Merger ───────────────────────────────────────────────────────────
-// الأولوية لكل فصل: GManga/Madara(AR)=3 > MDX(AR)=2 = ComicK(AR)=2 > إنجليزي=1
+// الأولوية: GManga/Madara(AR)=3 > MDX(AR)=2 = ComicK(AR)=2 > إنجليزي=1
+// المهم: نحفظ IDs من كل المصادر حتى عند الفشل نرجع لمصدر آخر
 
 function mergeChapters(allChapters) {
   const map = new Map();
+
   for (const ch of allChapters) {
     const existing = map.get(ch.num);
-    if (!existing || ch.priority > existing.priority) {
+
+    if (!existing) {
+      // إنشاء إدخال جديد مع كل IDs المتاحة
       map.set(ch.num, {
         num: ch.num, numF: ch.numF,
         flag: ch.isAr ? "🇸🇦" : getLangFlag(ch.lang),
         isAr: ch.isAr, title: ch.title || "",
-        source: ch.source, lang: ch.lang,
-        _dxId: ch._dxId || null,
-        _gmId: ch._gmId || null,
-        _ckHid: ch._ckHid || null,
-        _madaraUrl: ch._madaraUrl || null,
+        source: ch.source, lang: ch.lang, priority: ch.priority,
+        // ✅ نحفظ IDs من كل المصادر للرجوع إليها
+        _dxId:        ch._dxId        || null,
+        _gmId:        ch._gmId        || null,
+        _ckHid:       ch._ckHid       || null,
+        _madaraUrl:   ch._madaraUrl   || null,
         _madaraSource: ch._madaraSource || null
       });
+    } else {
+      // ✅ تحديث الأولوية إذا كان المصدر الجديد أفضل
+      if (ch.priority > existing.priority) {
+        existing.flag     = ch.isAr ? "🇸🇦" : getLangFlag(ch.lang);
+        existing.isAr     = ch.isAr;
+        existing.source   = ch.source;
+        existing.lang     = ch.lang;
+        existing.priority = ch.priority;
+        if (!existing.title && ch.title) existing.title = ch.title;
+      }
+      // ✅ دائماً احفظ IDs من كل المصادر (حتى لو لم يكن هو الأولوية)
+      if (ch._dxId        && !existing._dxId)        existing._dxId        = ch._dxId;
+      if (ch._gmId        && !existing._gmId)        existing._gmId        = ch._gmId;
+      if (ch._ckHid       && !existing._ckHid)       existing._ckHid       = ch._ckHid;
+      if (ch._madaraUrl   && !existing._madaraUrl)   existing._madaraUrl   = ch._madaraUrl;
+      if (ch._madaraSource && !existing._madaraSource) existing._madaraSource = ch._madaraSource;
     }
   }
+
   return Array.from(map.values()).sort((a, b) => a.numF - b.numF);
 }
 
@@ -642,30 +691,44 @@ function buildChapterList(mangaTitle, chapters, page) {
   return body;
 }
 
-// ─── جلب صور الفصل مع تجربة كل المصادر ──────────────────────────────────────
+// ─── جلب صور الفصل مع تجربة كل المصادر والبدائل ─────────────────────────────
 
 async function getChapterImages(chapter) {
   const errors = [];
 
-  // ترتيب: GManga > Madara عربي > MangaDex > ComicK
+  // 1) GManga (أعلى أولوية — عربي رسمي)
   if (chapter._gmId) {
     try { const r = await GManga.getImages(chapter._gmId); if (r?.urls?.length) return r; }
-    catch (e) { errors.push(`GManga: ${e.message}`); }
-  }
-  if (chapter._madaraUrl && chapter._madaraSource) {
-    try { const r = await chapter._madaraSource.getImages(chapter._madaraUrl); if (r?.urls?.length) return r; }
-    catch (e) { errors.push(`${chapter._madaraSource.name}: ${e.message}`); }
-  }
-  if (chapter._dxId) {
-    try { const r = await MangaDex.getImages(chapter._dxId); if (r?.urls?.length) return r; }
-    catch (e) { errors.push(`MDX: ${e.message}`); }
-  }
-  if (chapter._ckHid) {
-    try { const r = await ComicK.getImages(chapter._ckHid); if (r?.urls?.length) return r; }
-    catch (e) { errors.push(`ComicK: ${e.message}`); }
+    catch (e) { errors.push(`GManga: ${e.message?.slice(0, 60)}`); }
   }
 
-  throw new Error(`فشلت كل المصادر:\n${errors.slice(0, 3).join("\n")}`);
+  // 2) Madara (مصادر WordPress العربية)
+  if (chapter._madaraUrl && chapter._madaraSource) {
+    try { const r = await chapter._madaraSource.getImages(chapter._madaraUrl); if (r?.urls?.length) return r; }
+    catch (e) { errors.push(`${chapter._madaraSource.name}: ${e.message?.slice(0, 60)}`); }
+  }
+
+  // 3) MangaDex — جودة عالية أولاً
+  if (chapter._dxId) {
+    try { const r = await MangaDex.getImages(chapter._dxId); if (r?.urls?.length) return r; }
+    catch (e) { errors.push(`MDX: ${e.message?.slice(0, 60)}`); }
+
+    // 3b) MangaDex — جودة data-saver كاحتياط
+    try { const r = await MangaDex.getImagesSaver(chapter._dxId); if (r?.urls?.length) return r; }
+    catch (e) { errors.push(`MDX-saver: ${e.message?.slice(0, 60)}`); }
+  }
+
+  // 4) ComicK
+  if (chapter._ckHid) {
+    try { const r = await ComicK.getImages(chapter._ckHid); if (r?.urls?.length) return r; }
+    catch (e) { errors.push(`ComicK: ${e.message?.slice(0, 60)}`); }
+  }
+
+  // 5) إذا فشل كل شيء: أرسل رسالة مفيدة مع رقم الفصل
+  throw new Error(
+    `⚠️ فشل تحميل فصل ${chapter.num} من كل المصادر.\n` +
+    `المصادر المجربة:\n${errors.slice(0, 4).join("\n")}`
+  );
 }
 
 // ─── Page Downloader ──────────────────────────────────────────────────────────
