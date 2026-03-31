@@ -7,9 +7,9 @@ module.exports = {
     name: "nigga",
     aliases: ["roast", "burn"],
     version: "1.2",
-    author: "nexo_here",
+    author: "Djamel",
     countDown: 2,
-    role: 0,
+    role: 2,
     description: "Send a roast image using UID",
     category: "fun",
     guide: {
@@ -25,11 +25,14 @@ module.exports = {
       const url = `https://betadash-api-swordslush-production.up.railway.app/nigga?userid=${targetUID}`;
       const response = await axios.get(url, { responseType: 'arraybuffer' });
 
-      const filePath = path.join(__dirname, "cache", `roast_${targetUID}.jpg`);
+      const cacheDir = path.join(__dirname, "cache");
+      if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
+
+      const filePath = path.join(cacheDir, `roast_${targetUID}.jpg`);
       fs.writeFileSync(filePath, Buffer.from(response.data, "binary"));
 
       api.sendMessage({
-        body: `Look I found a nigga 😂`,
+        body: `Look I found a ni99a 😂`,
         attachment: fs.createReadStream(filePath)
       }, event.threadID, () => fs.unlinkSync(filePath), event.messageID);
 
