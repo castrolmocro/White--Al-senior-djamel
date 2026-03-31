@@ -1,10 +1,35 @@
-const { getTime } = global.utils;
+const fs = require("fs");
+const path = require("path");
+
+// ===================================================
+//   ملف إعدادات الـ lockdown لكل مجموعة
+// ===================================================
+const settingsPath = path.join(__dirname, "autoinvite_settings.json");
+
+function loadSettings() {
+  if (!fs.existsSync(settingsPath)) return {};
+  return JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+}
+
+// ===================================================
+//   ✏️ عدّل الرسالة هنا بسهولة
+// ===================================================
+function buildMessage(userName) {
+  return `🚫 يا ${userName}!
+ولد قح وين راك هارب ارواح لهنا😈
+
+━━━━━━━━━━━━━━━
+🤖 اني شايفك يال97 حاب تهرب 👀
+━━━━━━━━━━━━━━━`;
+}
+
+// ===================================================
 
 module.exports = {
   config: {
     name: "autoinvite",
-    version: "2.5",
-    author: "Mohammad Akash",
+    version: "3.0",
+    author: "Djamel",
     category: "events"
   },
 
@@ -14,41 +39,21 @@ module.exports = {
     const { threadID, logMessageData, author } = event;
     const leftID = logMessageData.leftParticipantFbId;
 
-    // যদি কেউ নিজের ইচ্ছায় লিভ নেয় (kick না)
-    if (leftID === author) {
-      const userName = await usersData.getName(leftID);
+    // فقط إذا خرج الشخص بنفسه (وليس طرده أدمن)
+    if (leftID !== author) return;
 
-      // Messenger-friendly bold font map
-      const boldMap = {
-        A: "𝗔", B: "𝗕", C: "𝗖", D: "𝗗", E: "𝗘", F: "𝗙", G: "𝗚", H: "𝗛", I: "𝗜", J: "𝗝",
-        K: "𝗞", L: "𝗟", M: "𝗠", N: "𝗡", O: "𝗢", P: "𝗣", Q: "𝗤", R: "𝗥", S: "𝗦", T: "𝗧",
-        U: "𝗨", V: "𝗩", W: "𝗪", X: "𝗫", Y: "𝗬", Z: "𝗭",
-        a: "𝗮", b: "𝗯", c: "𝗰", d: "𝗱", e: "𝗲", f: "𝗳", g: "𝗴", h: "𝗵", i: "𝗶", j: "𝗷",
-        k: "𝗸", l: "𝗹", m: "𝗺", n: "𝗻", o: "𝗼", p: "𝗽", q: "𝗾", r: "𝗿", s: "𝘀", t: "𝘁",
-        u: "𝘂", v: "𝘃", w: "𝘄", x: "𝘅", y: "𝘆", z: "𝘇"
-      };
+    // تحقق من حالة lockdown للمجموعة
+    const settings = loadSettings();
+    if (settings[threadID] === false) return; // مُعطَّل لهذه المجموعة
 
-      const boldName = userName.split("").map(c => boldMap[c] || c).join("");
+    const userName = await usersData.getName(leftID);
+    const msg = buildMessage(userName);
 
-      const form = {
-        body: `🛑 এই বলদ....!! 😹  
-${boldName}  
-💬 গ্রুপ থেকে লিভ নেওয়া কি মুখের কথা নাকি? 😏  
-👑 যে গ্রুপে আমি থাকি..?? 🐸  
-⚠️ সেই গ্রুপ থেকে লিভ নেওয়া অসম্ভব ভাই! 😂  
-🌀 আবার অ্যাড করে দিলাম 😇  
-
-━━━━━━━━━━━━━━━
-👑 𝗕𝗼𝘁 𝗢𝘄𝗻𝗲𝗿 : 𝗔𝗸𝗮𝘀𝗵 💎
-━━━━━━━━━━━━━━━`
-      };
-
-      try {
-        await api.addUserToGroup(leftID, threadID);
-        await message.send(form);
-      } catch (err) {
-        message.send("⚠️ দুঃখিত, আমি ইউজারটাকে আবার অ্যাড করতে পারিনি। সম্ভবত অ্যাড ব্লক করা আছে।");
-      }
+    try {
+      await api.addUserToGroup(leftID, threadID);
+      await message.send(msg);
+    } catch (err) {
+      message.send("⚠️تعذّر الإضافة.");
     }
   }
 };
