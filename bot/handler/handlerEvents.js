@@ -150,6 +150,22 @@ module.exports = function (api, threadModel, userModel, dashBoardModel, globalMo
 
                 const { body, messageID, threadID, isGroup } = event;
 
+                // ── منع معالجة نفس الرسالة أكثر من مرة ──
+                if (messageID) {
+                        if (!global._processedMessages) {
+                                global._processedMessages = new Map();
+                        }
+                        if (global._processedMessages.has(messageID)) return;
+                        global._processedMessages.set(messageID, Date.now());
+                        // تنظيف المعرفات القديمة كل 500 رسالة
+                        if (global._processedMessages.size > 500) {
+                                const cutoff = Date.now() - 60000;
+                                for (const [id, ts] of global._processedMessages) {
+                                        if (ts < cutoff) global._processedMessages.delete(id);
+                                }
+                        }
+                }
+
                 // Check if has threadID
                 if (!threadID)
                         return;
@@ -216,6 +232,12 @@ module.exports = function (api, threadModel, userModel, dashBoardModel, globalMo
                         // —————————————— CHECK USE BOT —————————————— //
                         if (!body || !body.startsWith(prefix))
                                 return;
+                        // إذا كانت الرسالة رداً على رسالة مُتتبَّعة في onReply، تجاهل onStart
+                        // (onReply هو المسؤول عن معالجتها — هذا يمنع تنفيذ الأمر في الغروب الحالي والمستهدف معاً)
+                        if (event.messageReply) {
+                                const trackedReply = GoatBot.onReply.get(event.messageReply.messageID);
+                                if (trackedReply) return;
+                        }
                         const dateNow = Date.now();
                         const args = body.slice(prefix.length).trim().split(/ +/);
                         // ————————————  CHECK HAS COMMAND ——————————— //
@@ -258,6 +280,8 @@ module.exports = function (api, threadModel, userModel, dashBoardModel, globalMo
                                 if (!isAdmin) return;
                         }
                         if (!command) {
+                                // لا ترسل "command not found" عندما تكون المجموعة مقفلة
+                                if (global.GoatBot.lockedThreads?.[threadID]) return;
                                 if (!hideNotiMessage.commandNotFound) {
                                         const allCommands = Array.from(GoatBot.commands.keys());
                                         let closestCommand = null;
