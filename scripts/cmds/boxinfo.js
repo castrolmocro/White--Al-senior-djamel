@@ -51,12 +51,10 @@ module.exports = {
     category: "box chat",
     guide: {
       en: "{pn} — عرض المعلومات\n"
-        + "{pn} lockname — قفل اسم المجموعة\n"
-        + "{pn} unlockname — فتح قفل الاسم\n"
-        + "{pn} locknick — قفل الكنيات\n"
+        + "{pn} locknick — قفل الكنيات (أدمن البوت يغيّر بحرية، الآخرون تُعاد كنيتهم)\n"
         + "{pn} unlocknick — فتح قفل الكنيات\n"
         + "{pn} setname <الاسم> — تغيير اسم المجموعة\n"
-        + "{pn} status — حالة الأقفال الحالية"
+        + "{pn} status — حالة القفل الحالية"
     }
   },
 
@@ -100,7 +98,6 @@ module.exports = {
         ? `#${Number(info.color).toString(16).padStart(6, "0").toUpperCase()}`
         : "افتراضي";
 
-      const lockNameStatus = locks.lockName ? "🔒 مقفل" : "🔓 مفتوح";
       const lockNickStatus = locks.lockNick ? "🔒 مقفل" : "🔓 مفتوح";
 
       const text =
@@ -122,7 +119,6 @@ module.exports = {
 🎨 اللون       : ${color}
 ╠══════════════════════╣
 🤖 البوت       : ${botAdmin}
-🏷️ قفل الاسم  : ${lockNameStatus}
 ✏️ قفل الكنية : ${lockNickStatus}
 ╠══════════════════════╣
 📅 انضمام البوت : ${joinedDate}
@@ -172,31 +168,6 @@ module.exports = {
       }
     }
 
-    // ── قفل اسم المجموعة ──
-    if (sub === "lockname") {
-      let info;
-      try { info = await api.getThreadInfo(tid); } catch (e) { return api.sendMessage("❌ فشل في جلب معلومات المجموعة.", tid, mid); }
-      if (!isBotAdmin(info)) return api.sendMessage("⚠️ البوت ليس أدمناً في هذه المجموعة.\nأعطه صلاحية الأدمن أولاً.", tid, mid);
-      const locks = await getLocks(threadsData, tid);
-      locks.lockName = true;
-      locks.lockedName = info.threadName || "";
-      await saveLocks(threadsData, tid, locks);
-      return api.sendMessage(
-        `🔒 تم قفل اسم المجموعة.\n`
-        + `أي شخص يحاول تغيير الاسم سيُعاد تلقائياً إلى:\n"${locks.lockedName}"`,
-        tid, mid
-      );
-    }
-
-    // ── فتح قفل اسم المجموعة ──
-    if (sub === "unlockname") {
-      const locks = await getLocks(threadsData, tid);
-      locks.lockName = false;
-      locks.lockedName = null;
-      await saveLocks(threadsData, tid, locks);
-      return api.sendMessage("🔓 تم فتح قفل اسم المجموعة.\nيمكن للجميع تغيير الاسم الآن.", tid, mid);
-    }
-
     // ── قفل الكنيات ──
     if (sub === "locknick") {
       let info;
@@ -217,10 +188,10 @@ module.exports = {
       await saveLocks(threadsData, tid, locks);
       const savedCount = Object.values(locks.protectedNicks).filter(n => n).length;
       return api.sendMessage(
-        `🔒 تم قفل الكنيات.\n`
-        + `📸 تم حفظ ${savedCount} كنية حالية كـ"محمية".\n`
-        + `• أدمن يغيّر كنية عضو → تُحفظ الجديدة وتُطبَّق.\n`
-        + `• أي عضو آخر يغيّر كنيته → تُعاد الكنية المحمية تلقائياً.`,
+        `🔒 تم قفل الكُنيات.\n`
+        + `📸 تم حفظ ${savedCount} كُنية حالية كـ"محمية".\n\n`
+        + `• أدمن البوت يغيّر كُنية → تُحفظ تلقائياً وتصبح هي المحمية.\n`
+        + `• أي شخص آخر يغيّر كُنيته → تُعاد الكُنية المحمية تلقائياً.`,
         tid, mid
       );
     }
@@ -244,11 +215,9 @@ module.exports = {
 `📊 حالة الأقفال في هذه المجموعة:
 ━━━━━━━━━━━━━━━━━━━━
 🤖 البوت         : ${botAdmin}
-🏷️ قفل الاسم    : ${locks.lockName ? `🔒 مقفل\n   ↩️ الاسم المحفوظ: "${locks.lockedName}"` : "🔓 مفتوح"}
-✏️ قفل الكنيات  : ${locks.lockNick ? "🔒 مقفل" : "🔓 مفتوح"}
+✏️ قفل الكُنيات : ${locks.lockNick ? "🔒 مقفل" : "🔓 مفتوح"}
 ━━━━━━━━━━━━━━━━━━━━
 الأوامر المتاحة:
-• groupinfo lockname / unlockname
 • groupinfo locknick / unlocknick
 • groupinfo setname <الاسم>`,
         tid, mid
@@ -258,7 +227,6 @@ module.exports = {
     return api.sendMessage(
       "❓ أمر غير معروف. الأوامر المتاحة:\n"
       + "• groupinfo — عرض المعلومات\n"
-      + "• groupinfo lockname / unlockname\n"
       + "• groupinfo locknick / unlocknick\n"
       + "• groupinfo setname <الاسم>\n"
       + "• groupinfo status",
