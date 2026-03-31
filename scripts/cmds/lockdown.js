@@ -53,7 +53,7 @@ module.exports = {
     }
 
     if (action === "status") {
-      const isActive = settings[threadID] !== false;
+      const isActive = settings[threadID] === true;
       return message.reply(
         `📊 حالة الخاصية في هذه المجموعة:\n` +
         `${isActive ? "✅ مفعّلة" : "🔴 موقوفة"}`
