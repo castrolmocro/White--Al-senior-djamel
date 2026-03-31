@@ -218,21 +218,48 @@ module.exports = {
           return api.sendMessage("📭 البوت ليس في أي غروب حالياً.", event.threadID);
         }
 
-        groups.sort((a, b) => (Number(b.messageCount) || 0) - (Number(a.messageCount) || 0));
+        // ترتيب حسب آخر نشاط (timestamp أو messageCount)
+        groups.sort((a, b) => {
+          const tA = Number(a.timestamp) || Number(a.messageCount) || 0;
+          const tB = Number(b.timestamp) || Number(b.messageCount) || 0;
+          return tB - tA;
+        });
 
         const list = [];
         const angelData = loadAngelData();
-        let msg = `👥 الغروبات (${groups.length})\n━━━━━━━━━━━━━━━\n`;
+
+        function timeAgo(ts) {
+          if (!ts) return "—";
+          const diff = Date.now() - Number(ts);
+          const m = Math.floor(diff / 60000);
+          if (m < 1) return "الآن";
+          if (m < 60) return `${m} د`;
+          const h = Math.floor(m / 60);
+          if (h < 24) return `${h} س`;
+          return `${Math.floor(h / 24)} ي`;
+        }
+
+        const total = groups.length;
+        let msg = `╔══════════════════╗\n`;
+        msg    += `  👥 الغروبات · المجموع: ${total}\n`;
+        msg    += `╚══════════════════╝\n\n`;
 
         groups.slice(0, 25).forEach((g, i) => {
-          const name = g.name || g.threadName || ("ID: " + g.threadID);
-          const angelStatus = angelData[g.threadID]?.active ? "🟢" : "⚫";
-          const count = Number(g.messageCount) || 0;
-          msg += `${i + 1}. ${name}\n   💬 ${count} رسالة · Angel: ${angelStatus}\n   🆔 ${g.threadID}\n\n`;
+          const name       = (g.name || g.threadName || ("ID: " + g.threadID)).slice(0, 22);
+          const angel      = angelData[g.threadID]?.active ? "🟢" : "⚫";
+          const members    = g.participantIDs?.length || g.memberCount || "?";
+          const last       = timeAgo(g.timestamp);
+          const msgCount   = Number(g.messageCount) || 0;
+          const lock       = global.GoatBot.lockedThreads?.[g.threadID] ? "🔒" : "";
+
+          msg += `${i + 1}. ${lock}${name}\n`;
+          msg += `   👥${members}  💬${msgCount}  🕐${last}  A:${angel}\n\n`;
           list.push({ threadID: g.threadID, name });
         });
 
-        msg += "━━━━━━━━━━━━━━━\n↩️ رد برقم الغروب لإدارته";
+        msg += "━━━━━━━━━━━━━━━\n";
+        msg += "🕐=آخر نشاط  A=Angel  🔒=مقفل\n";
+        msg += "↩️ رد برقم الغروب لإدارته";
 
         api.sendMessage(msg, event.threadID, (err, info) => {
           if (err || !info) return;
