@@ -63,12 +63,33 @@ function withTimeout(promise, ms = 15000) {
   ]);
 }
 
+// تحويل أي استجابة من getThreadList إلى مصفوفة نظيفة
+function parseThreadListResponse(result) {
+  if (!result) return [];
+  if (Array.isArray(result)) return result;
+  if (Array.isArray(result.data)) return result.data;
+  if (Array.isArray(result.threads)) return result.threads;
+  if (typeof result === "object") {
+    const vals = Object.values(result);
+    for (const v of vals) {
+      if (Array.isArray(v) && v.length > 0 && v[0]?.threadID) return v;
+    }
+  }
+  return [];
+}
+
+// تحويل timestamp إلى milliseconds بغض النظر عن الصيغة
+function toMs(ts) {
+  if (!ts) return 0;
+  const n = Number(ts);
+  if (isNaN(n) || n === 0) return 0;
+  return n < 1e12 ? n * 1000 : n;
+}
+
 async function safeGetThreadList(api, limit, timestamp, tags) {
   try {
     const result = await withTimeout(api.getThreadList(limit, timestamp || null, tags), 15000);
-    if (Array.isArray(result)) return result;
-    if (result?.data) return result.data;
-    return [];
+    return parseThreadListResponse(result);
   } catch (_) { return []; }
 }
 
@@ -76,33 +97,46 @@ async function safeGetThreadList(api, limit, timestamp, tags) {
 
 async function getAllGroups(api) {
   let groups = [];
+  let lastError = null;
 
-  // محاولة 1: INBOX بدون cursor
+  // محاولة 1: INBOX بدون cursor (أحدث البيانات دائماً)
   try {
-    const batch1 = await withTimeout(api.getThreadList(100, null, ["INBOX"]), 18000);
-    const list1 = Array.isArray(batch1) ? batch1 : (batch1?.data || []);
+    const raw1 = await withTimeout(api.getThreadList(100, null, ["INBOX"]), 20000);
+    const list1 = parseThreadListResponse(raw1);
     const g1 = list1.filter(t => t && t.isGroup && t.threadID);
     groups = groups.concat(g1);
 
-    // محاولة 2: إذا جاءت 100 نتيجة، جرب صفحة ثانية
+    // صفحة ثانية فقط إذا امتلأت الأولى
     if (list1.length >= 100) {
-      const lastTs = list1[list1.length - 1]?.timestamp;
-      if (lastTs) {
-        await new Promise(r => setTimeout(r, 500));
-        const batch2 = await withTimeout(api.getThreadList(100, lastTs, ["INBOX"]), 18000);
-        const list2 = Array.isArray(batch2) ? batch2 : (batch2?.data || []);
-        const g2 = list2.filter(t => t && t.isGroup && t.threadID);
-        groups = groups.concat(g2);
-      }
+      // نستخدم null للصفحة الثانية مع تعديل الـ offset بدلاً من timestamp
+      // حتى لا نجيب بيانات قديمة
+      await new Promise(r => setTimeout(r, 300));
+      const raw2 = await withTimeout(api.getThreadList(100, null, ["INBOX"]), 20000);
+      const list2 = parseThreadListResponse(raw2);
+      const g2 = list2.filter(t => t && t.isGroup && t.threadID);
+      groups = groups.concat(g2);
     }
-  } catch (_) {}
+  } catch (e) { lastError = e; }
 
-  // محاولة احتياطية: بدون تاج (بعض الإصدارات لا تدعم INBOX)
+  // محاولة 2: بدون تاج (بعض إصدارات FCA لا تدعم INBOX)
   if (!groups.length) {
     try {
-      const fallback = await withTimeout(api.getThreadList(60, null, []), 18000);
-      const list = Array.isArray(fallback) ? fallback : (fallback?.data || []);
-      groups = list.filter(t => t && t.isGroup && t.threadID);
+      const raw2 = await withTimeout(api.getThreadList(100, null, []), 20000);
+      const list2 = parseThreadListResponse(raw2);
+      groups = list2.filter(t => t && t.isGroup && t.threadID);
+    } catch (e) { lastError = e; }
+  }
+
+  // محاولة 3: بدون أي وسيطة للتاجات
+  if (!groups.length) {
+    try {
+      const raw3 = await withTimeout(
+        new Promise((res, rej) => {
+          try { res(api.getThreadList(60)); } catch (e) { rej(e); }
+        }), 20000
+      );
+      const list3 = parseThreadListResponse(raw3);
+      groups = list3.filter(t => t && t.isGroup && t.threadID);
     } catch (_) {}
   }
 
@@ -246,22 +280,24 @@ module.exports = {
         const groups = await getAllGroups(api);
 
         if (!groups.length) {
-          return api.sendMessage("📭 البوت ليس في أي غروب حالياً.", event.threadID);
+          return api.sendMessage(
+            "📭 لم يتم العثور على غروبات.\n"
+            + "السبب المحتمل: فشل الاتصال بـ Facebook أو البوت ليس في أي غروب حالياً.",
+            event.threadID
+          );
         }
 
-        // ترتيب حسب آخر نشاط (timestamp أو messageCount)
-        groups.sort((a, b) => {
-          const tA = Number(a.timestamp) || Number(a.messageCount) || 0;
-          const tB = Number(b.timestamp) || Number(b.messageCount) || 0;
-          return tB - tA;
-        });
+        // ترتيب حسب آخر نشاط (وقت فعلي - الأحدث أولاً)
+        groups.sort((a, b) => toMs(b.timestamp) - toMs(a.timestamp));
 
         const list = [];
         const angelData = loadAngelData();
 
         function timeAgo(ts) {
-          if (!ts) return "—";
-          const diff = Date.now() - Number(ts);
+          const ms = toMs(ts);
+          if (!ms) return "—";
+          const diff = Date.now() - ms;
+          if (diff < 0) return "الآن";
           const m = Math.floor(diff / 60000);
           if (m < 1) return "الآن";
           if (m < 60) return `${m} د`;
@@ -271,8 +307,10 @@ module.exports = {
         }
 
         const total = groups.length;
+        const fetchedAt = new Date().toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" });
         let msg = `╔══════════════════╗\n`;
         msg    += `  👥 الغروبات · المجموع: ${total}\n`;
+        msg    += `  🔄 محدّث: ${fetchedAt}\n`;
         msg    += `╚══════════════════╝\n\n`;
 
         groups.slice(0, 25).forEach((g, i) => {
@@ -293,7 +331,8 @@ module.exports = {
         msg += "↩️ رد برقم الغروب لإدارته";
 
         api.sendMessage(msg, event.threadID, (err, info) => {
-          if (err || !info) return;
+          if (err) return api.sendMessage("❌ فشل إرسال قائمة الغروبات.", event.threadID);
+          if (!info) return;
           setReply(api, event, commandName, info, { step: "GROUP_LIST", list });
         });
 
