@@ -54,99 +54,34 @@ function setReply(api, event, commandName, info, replyData) {
   });
 }
 
-// ─── جلب قائمة المحادثات مع timeout لمنع التجمد ──────────────────────────────
-
-function withTimeout(promise, ms = 15000) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), ms))
-  ]);
-}
-
-// تحويل أي استجابة من getThreadList إلى مصفوفة نظيفة
-function parseThreadListResponse(result) {
-  if (!result) return [];
-  if (Array.isArray(result)) return result;
-  if (Array.isArray(result.data)) return result.data;
-  if (Array.isArray(result.threads)) return result.threads;
-  if (typeof result === "object") {
-    const vals = Object.values(result);
-    for (const v of vals) {
-      if (Array.isArray(v) && v.length > 0 && v[0]?.threadID) return v;
-    }
-  }
-  return [];
-}
-
-// تحويل timestamp إلى milliseconds بغض النظر عن الصيغة
-function toMs(ts) {
-  if (!ts) return 0;
-  const n = Number(ts);
-  if (isNaN(n) || n === 0) return 0;
-  return n < 1e12 ? n * 1000 : n;
-}
-
-async function safeGetThreadList(api, limit, timestamp, tags) {
+async function safeGetThreadList(api, limit, cursor, tags) {
   try {
-    const result = await withTimeout(api.getThreadList(limit, timestamp || null, tags), 15000);
-    return parseThreadListResponse(result);
+    const result = await api.getThreadList(limit, cursor, tags);
+    if (Array.isArray(result)) return result;
+    if (result?.data) return result.data;
+    return [];
   } catch (_) { return []; }
 }
 
-// ─── جلب كل الغروبات بطريقة آمنة ────────────────────────────────────────────
+// ─── جلب كل الغروبات (مع pagination) ─────────────────────────────────────────
 
 async function getAllGroups(api) {
   let groups = [];
-  let lastError = null;
-
-  // محاولة 1: INBOX بدون cursor (أحدث البيانات دائماً)
-  try {
-    const raw1 = await withTimeout(api.getThreadList(100, null, ["INBOX"]), 20000);
-    const list1 = parseThreadListResponse(raw1);
-    const g1 = list1.filter(t => t && t.isGroup && t.threadID);
-    groups = groups.concat(g1);
-
-    // صفحة ثانية فقط إذا امتلأت الأولى
-    if (list1.length >= 100) {
-      // نستخدم null للصفحة الثانية مع تعديل الـ offset بدلاً من timestamp
-      // حتى لا نجيب بيانات قديمة
-      await new Promise(r => setTimeout(r, 300));
-      const raw2 = await withTimeout(api.getThreadList(100, null, ["INBOX"]), 20000);
-      const list2 = parseThreadListResponse(raw2);
-      const g2 = list2.filter(t => t && t.isGroup && t.threadID);
-      groups = groups.concat(g2);
-    }
-  } catch (e) { lastError = e; }
-
-  // محاولة 2: بدون تاج (بعض إصدارات FCA لا تدعم INBOX)
-  if (!groups.length) {
-    try {
-      const raw2 = await withTimeout(api.getThreadList(100, null, []), 20000);
-      const list2 = parseThreadListResponse(raw2);
-      groups = list2.filter(t => t && t.isGroup && t.threadID);
-    } catch (e) { lastError = e; }
+  let cursor = null;
+  let pages = 0;
+  while (pages < 5) {
+    const batch = await safeGetThreadList(api, 50, cursor, ["INBOX"]);
+    if (!batch.length) break;
+    const batchGroups = batch.filter(t => t && t.isGroup && t.threadID);
+    groups = groups.concat(batchGroups);
+    const lastItem = batch[batch.length - 1];
+    if (!lastItem || batch.length < 50) break;
+    cursor = lastItem.timestamp || null;
+    if (!cursor) break;
+    pages++;
+    await new Promise(r => setTimeout(r, 300));
   }
-
-  // محاولة 3: بدون أي وسيطة للتاجات
-  if (!groups.length) {
-    try {
-      const raw3 = await withTimeout(
-        new Promise((res, rej) => {
-          try { res(api.getThreadList(60)); } catch (e) { rej(e); }
-        }), 20000
-      );
-      const list3 = parseThreadListResponse(raw3);
-      groups = list3.filter(t => t && t.isGroup && t.threadID);
-    } catch (_) {}
-  }
-
-  // إزالة التكرار
-  const seen = new Set();
-  return groups.filter(g => {
-    if (seen.has(g.threadID)) return false;
-    seen.add(g.threadID);
-    return true;
-  });
+  return groups;
 }
 
 // ─── تنفيذ أمر عن بُعد في غروب آخر ──────────────────────────────────────────
@@ -280,59 +215,27 @@ module.exports = {
         const groups = await getAllGroups(api);
 
         if (!groups.length) {
-          return api.sendMessage(
-            "📭 لم يتم العثور على غروبات.\n"
-            + "السبب المحتمل: فشل الاتصال بـ Facebook أو البوت ليس في أي غروب حالياً.",
-            event.threadID
-          );
+          return api.sendMessage("📭 البوت ليس في أي غروب حالياً.", event.threadID);
         }
 
-        // ترتيب حسب آخر نشاط (وقت فعلي - الأحدث أولاً)
-        groups.sort((a, b) => toMs(b.timestamp) - toMs(a.timestamp));
+        groups.sort((a, b) => (Number(b.messageCount) || 0) - (Number(a.messageCount) || 0));
 
         const list = [];
         const angelData = loadAngelData();
-
-        function timeAgo(ts) {
-          const ms = toMs(ts);
-          if (!ms) return "—";
-          const diff = Date.now() - ms;
-          if (diff < 0) return "الآن";
-          const m = Math.floor(diff / 60000);
-          if (m < 1) return "الآن";
-          if (m < 60) return `${m} د`;
-          const h = Math.floor(m / 60);
-          if (h < 24) return `${h} س`;
-          return `${Math.floor(h / 24)} ي`;
-        }
-
-        const total = groups.length;
-        const fetchedAt = new Date().toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" });
-        let msg = `╔══════════════════╗\n`;
-        msg    += `  👥 الغروبات · المجموع: ${total}\n`;
-        msg    += `  🔄 محدّث: ${fetchedAt}\n`;
-        msg    += `╚══════════════════╝\n\n`;
+        let msg = `👥 الغروبات (${groups.length})\n━━━━━━━━━━━━━━━\n`;
 
         groups.slice(0, 25).forEach((g, i) => {
-          const name       = (g.name || g.threadName || ("ID: " + g.threadID)).slice(0, 22);
-          const angel      = angelData[g.threadID]?.active ? "🟢" : "⚫";
-          const members    = g.participantIDs?.length || g.memberCount || "?";
-          const last       = timeAgo(g.timestamp);
-          const msgCount   = Number(g.messageCount) || 0;
-          const lock       = global.GoatBot.lockedThreads?.[g.threadID] ? "🔒" : "";
-
-          msg += `${i + 1}. ${lock}${name}\n`;
-          msg += `   👥${members}  💬${msgCount}  🕐${last}  A:${angel}\n\n`;
+          const name = g.name || g.threadName || ("ID: " + g.threadID);
+          const angelStatus = angelData[g.threadID]?.active ? "🟢" : "⚫";
+          const count = Number(g.messageCount) || 0;
+          msg += `${i + 1}. ${name}\n   💬 ${count} رسالة · Angel: ${angelStatus}\n   🆔 ${g.threadID}\n\n`;
           list.push({ threadID: g.threadID, name });
         });
 
-        msg += "━━━━━━━━━━━━━━━\n";
-        msg += "🕐=آخر نشاط  A=Angel  🔒=مقفل\n";
-        msg += "↩️ رد برقم الغروب لإدارته";
+        msg += "━━━━━━━━━━━━━━━\n↩️ رد برقم الغروب لإدارته";
 
         api.sendMessage(msg, event.threadID, (err, info) => {
-          if (err) return api.sendMessage("❌ فشل إرسال قائمة الغروبات.", event.threadID);
-          if (!info) return;
+          if (err || !info) return;
           setReply(api, event, commandName, info, { step: "GROUP_LIST", list });
         });
 
