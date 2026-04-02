@@ -1,28 +1,28 @@
 const path = require("path");
 const {
-  MangaDex, GManga, ComicK, ARABIC_MADARA_SOURCES,
+  MangaDex, GManga, ComicK, ARABIC_MADARA_SOURCES, HENTAI_MADARA_SOURCES,
   fetchAllChapters, buildChapterList, sendChapterPages, handleReply,
   loadProgress, getLangFlag, getStatusLabel, CHAPTERS_PER_PAGE
 } = require(path.join(__dirname, "mangaUtils"));
 
 const ADULT_RATINGS = ["erotica", "pornographic"];
 
-// ─── Search: محتوى للبالغين فقط من كل المصادر ────────────────────────────────
+// ─── Search ───────────────────────────────────────────────────────────────────
 
 async function searchHentai(query) {
   const [dxRes, ckRes, gmRes] = await Promise.allSettled([
-    MangaDex.search(query, { ratings: ADULT_RATINGS, limit: 15 }),
+    MangaDex.search(query, { ratings: ADULT_RATINGS, limit: 20 }),
     ComicK.search(query),
     GManga.search(query)
   ]);
 
-  const dx  = dxRes.status === "fulfilled" ? dxRes.value : [];
-  const ck  = ckRes.status === "fulfilled" ? ckRes.value : [];
-  const gm  = gmRes.status === "fulfilled" ? gmRes.value : [];
+  const dx = dxRes.status === "fulfilled" ? dxRes.value : [];
+  const ck = ckRes.status === "fulfilled" ? ckRes.value : [];
+  const gm = gmRes.status === "fulfilled" ? gmRes.value : [];
 
-  // البحث في مصادر Madara عربية (بعضها يحتوي محتوى +18)
+  // استخدم مصادر الهنتاي المخصصة
   const madaraResults = await Promise.allSettled(
-    ARABIC_MADARA_SOURCES.map(src => src.search(query))
+    HENTAI_MADARA_SOURCES.map(src => src.search(query))
   );
   const madara = madaraResults.filter(r => r.status === "fulfilled").flatMap(r => r.value);
 
@@ -47,16 +47,16 @@ async function searchHentai(query) {
 module.exports = {
   config: {
     name: "hentai",
-    aliases: ["h", "هنتاي", "adult", "18+"],
-    version: "5.0",
+    aliases: ["h", "هنتاي", "adult", "18+", "هنتي"],
+    version: "6.0",
     author: "Djamel",
     countDown: 5,
     role: 2,
-    shortDescription: "🔞 مانغا للكبار — 8 مصادر (أدمن فقط)",
-    longDescription: "يبحث في GManga · Mangalek · 3asq · MangaSwat · ArTeam · MangaAE · ComicK · MangaDex بمحتوى +18",
+    shortDescription: "🔞 مانغا للكبار — 15+ مصدر (أدمن فقط)",
+    longDescription: "يبحث في GManga · Hentaimama · Manhwa18 · Hentai3z · Mangalek · 3asq · MangaSwat · ComicK · MangaDex بمحتوى +18",
     category: "anime",
     guide: {
-      en: "{pn} <اسم المانغا>\nمثال:\n{pn} domestic girlfriend\n{pn} citrus\n{pn} overflow\n{pn} تقدم — لعرض تقدم القراءة"
+      en: "{pn} <اسم المانغا>\nمثال:\n{pn} domestic girlfriend\n{pn} citrus\n{pn} overflow\n{pn} nana\n{pn} تقدم — لعرض تقدم القراءة"
     }
   },
 
@@ -66,7 +66,7 @@ module.exports = {
 
     if (!query) {
       return api.sendMessage(
-        "🔞 اكتب اسم المانغا (للأدمن فقط).\n\nأمثلة:\n/hentai domestic girlfriend\n/hentai citrus\n/hentai overflow\n/hentai nana\n\n📡 المصادر العربية:\n🇸🇦 GManga · Mangalek · 3asq · MangaSwat · ArTeam · MangaAE\n🌐 ComicK · MangaDex\n\n/hentai تقدم — آخر فصل قرأته",
+        "🔞 اكتب اسم المانغا (للأدمن فقط).\n\nأمثلة:\n/hentai domestic girlfriend\n/hentai citrus\n/hentai overflow\n/hentai nana\n/hentai berserk\n\n📡 المصادر:\n🇸🇦 GManga · Hentaimama · Manhwa18 · Hentai3z\n🇸🇦 Mangalek · 3asq · MangaSwat\n🌐 ComicK · MangaDex\n\n/hentai تقدم — آخر فصل قرأته",
         threadID, messageID
       );
     }
@@ -91,7 +91,10 @@ module.exports = {
       const results = await searchHentai(query);
       if (!results.length) {
         api.setMessageReaction("❌", messageID, () => {}, true);
-        return api.sendMessage(`❌ لم أجد نتائج لـ "${query}".\n💡 جرب اسماً مختلفاً بالإنجليزي.`, threadID, messageID);
+        return api.sendMessage(
+          `❌ لم أجد نتائج لـ "${query}".\n💡 جرب اسماً مختلفاً بالإنجليزي.`,
+          threadID, messageID
+        );
       }
 
       let body = `🔞 نتائج: "${query}"\n━━━━━━━━━━━━━━━━━━\n\n`;
@@ -129,17 +132,20 @@ module.exports = {
 
       const m = Reply.results[n - 1];
       api.setMessageReaction("⏳", messageID, () => {}, true);
-      api.sendMessage(`⏳ جاري جلب الفصول من كل المصادر العربية...\n🔞 "${m.title}"`, threadID);
+      api.sendMessage(`⏳ جاري جلب الفصول...\n🔞 "${m.title}"`, threadID);
 
       try {
-        const chapters = await fetchAllChapters(
-          m.title, m._mdxId || null, m._ckHid || null,
-          { ratings: ADULT_RATINGS }
-        );
+        const chapters = await fetchAllChapters(m, null, null, {
+          ratings: ADULT_RATINGS,
+          hentaiMode: true
+        });
 
         if (!chapters.length) {
           api.setMessageReaction("❌", messageID, () => {}, true);
-          return api.sendMessage(`❌ لا توجد فصول متاحة لـ "${m.title}".`, threadID, messageID);
+          return api.sendMessage(
+            `❌ لا توجد فصول متاحة لـ "${m.title}".\n💡 جرب باسم مختلف.`,
+            threadID, messageID
+          );
         }
 
         const arCount = chapters.filter(c => c.isAr).length;
