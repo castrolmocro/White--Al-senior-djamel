@@ -49,8 +49,8 @@ module.exports = {
     author: "Djamel",
     countDown: 5,
     role: 0,
-    shortDescription: "اقرأ المانغا بالعربية — 15+ مصدر",
-    longDescription: "يبحث في GManga · Mangalek · 3asq · MangaSwat · ArTeam · MangaAE · TeamX · GalaxyManga · OzulScans · PerfectManga · ArabsManga · KelManga · MangaArab · Onimanga · MangaKey · ComicK · MangaDex · MangaSee",
+    shortDescription: "اقرأ المانغا بالعربية — 30+ مصدر",
+    longDescription: "يبحث في 30+ مصدر عربي وعالمي: GManga · Mangalek · 3asq · MangaSwat · TeamX · GalaxyManga · OzulScans · KelManga · WeManga · FlixManga · Manga4up · ArabsManga · MangaArab · Onimanga · ComicK · MangaDex · MangaSee وأكثر",
     category: "anime",
     guide: { en: "{pn} <اسم المانغا>\nمثال: {pn} naruto\n{pn} jujutsu kaisen\n{pn} one piece\n{pn} تقدم — لعرض تقدم القراءة" }
   },
