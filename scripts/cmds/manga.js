@@ -5,11 +5,11 @@ const {
   loadProgress, getLangFlag, getStatusLabel, CHAPTERS_PER_PAGE
 } = require(path.join(__dirname, "mangaUtils"));
 
-// ─── Search: يجمع من MangaDex + GManga + ComicK + المصادر العربية ────────────
+// ─── Search ───────────────────────────────────────────────────────────────────
 
 async function searchManga(query) {
   const [dxRes, ckRes, gmRes] = await Promise.allSettled([
-    MangaDex.search(query, { ratings: ["safe", "suggestive", "erotica"], limit: 15 }),
+    MangaDex.search(query, { ratings: ["safe", "suggestive", "erotica"], limit: 20 }),
     ComicK.search(query),
     GManga.search(query)
   ]);
@@ -18,7 +18,6 @@ async function searchManga(query) {
   const ck = ckRes.status === "fulfilled" ? ckRes.value : [];
   const gm = gmRes.status === "fulfilled" ? gmRes.value : [];
 
-  // البحث في مصادر Madara العربية بالتوازي
   const madaraResults = await Promise.allSettled(
     ARABIC_MADARA_SOURCES.map(src => src.search(query))
   );
@@ -26,7 +25,6 @@ async function searchManga(query) {
 
   const seen = new Set();
   const merged = [];
-  // نبدأ بالعربي أولاً: GManga ثم Madara ثم MangaDex ثم ComicK
   for (const m of [...gm, ...madara, ...dx, ...ck]) {
     const key = (m.title || "").toLowerCase().replace(/[^a-z0-9\u0600-\u06FF]/g, "").slice(0, 30);
     if (!seen.has(key)) { seen.add(key); merged.push(m); }
@@ -47,14 +45,14 @@ module.exports = {
   config: {
     name: "manga",
     aliases: ["man", "مانغا", "مانجا", "مانغة"],
-    version: "9.0",
+    version: "10.0",
     author: "Djamel",
     countDown: 5,
     role: 0,
-    shortDescription: "اقرأ المانغا بالعربية — 8 مصادر",
-    longDescription: "يبحث في GManga · Mangalek · 3asq · MangaSwat · ArTeam · MangaAE · ComicK · MangaDex ويدمج كل الفصول العربية",
+    shortDescription: "اقرأ المانغا بالعربية — 15+ مصدر",
+    longDescription: "يبحث في GManga · Mangalek · 3asq · MangaSwat · ArTeam · MangaAE · TeamX · GalaxyManga · OzulScans · PerfectManga · ArabsManga · KelManga · MangaArab · Onimanga · MangaKey · ComicK · MangaDex · MangaSee",
     category: "anime",
-    guide: { en: "{pn} <اسم المانغا>\nمثال: {pn} naruto\n{pn} تقدم — لعرض تقدم القراءة" }
+    guide: { en: "{pn} <اسم المانغا>\nمثال: {pn} naruto\n{pn} jujutsu kaisen\n{pn} one piece\n{pn} تقدم — لعرض تقدم القراءة" }
   },
 
   onStart: async function ({ api, event, args, commandName }) {
@@ -63,7 +61,7 @@ module.exports = {
 
     if (!query) {
       return api.sendMessage(
-        "📚 اكتب اسم المانغا.\n\nأمثلة:\n/manga naruto\n/manga jujutsu kaisen\n/manga one piece\n/manga black clover\n\n📡 المصادر العربية:\n🇸🇦 GManga · Mangalek · 3asq · MangaSwat · ArTeam · MangaAE\n🌐 ComicK · MangaDex\n\n/manga تقدم — آخر فصل قرأته",
+        "📚 اكتب اسم المانغا.\n\nأمثلة:\n/manga naruto\n/manga jujutsu kaisen\n/manga one piece\n/manga black clover\n/manga attack on titan\n/manga demon slayer\n\n📡 المصادر (15+):\n🇸🇦 GManga · Mangalek · 3asq · MangaSwat · TeamX · GalaxyManga · OzulScans\n🇸🇦 PerfectManga · ArabsManga · KelManga · MangaArab · Onimanga · MangaKey\n🌐 ComicK · MangaDex · MangaSee\n\n/manga تقدم — آخر فصل قرأته",
         threadID, messageID
       );
     }
@@ -88,7 +86,10 @@ module.exports = {
       const results = await searchManga(query);
       if (!results.length) {
         api.setMessageReaction("❌", messageID, () => {}, true);
-        return api.sendMessage(`❌ لم أجد نتائج لـ "${query}".\n💡 جرب الاسم بالإنجليزي.`, threadID, messageID);
+        return api.sendMessage(
+          `❌ لم أجد نتائج لـ "${query}".\n💡 جرب الاسم بالإنجليزي أو تأكد من الإملاء.`,
+          threadID, messageID
+        );
       }
 
       let body = `🔍 نتائج: "${query}"\n━━━━━━━━━━━━━━━━━━\n\n`;
@@ -129,14 +130,17 @@ module.exports = {
       api.sendMessage(`⏳ جاري جلب الفصول من كل المصادر العربية...\n📚 "${m.title}"`, threadID);
 
       try {
-        const chapters = await fetchAllChapters(
-          m.title, m._mdxId || null, m._ckHid || null,
-          { ratings: ["safe", "suggestive", "erotica"] }
-        );
+        // نمرر الكائن كاملاً لتجنب البحث المزدوج
+        const chapters = await fetchAllChapters(m, null, null, {
+          ratings: ["safe", "suggestive", "erotica"]
+        });
 
         if (!chapters.length) {
           api.setMessageReaction("❌", messageID, () => {}, true);
-          return api.sendMessage(`❌ لا توجد فصول متاحة لـ "${m.title}".`, threadID, messageID);
+          return api.sendMessage(
+            `❌ لا توجد فصول متاحة لـ "${m.title}".\n💡 جرب باسم مختلف أو مصدر آخر.`,
+            threadID, messageID
+          );
         }
 
         const arCount = chapters.filter(c => c.isAr).length;
