@@ -5,13 +5,13 @@ const {
   loadProgress, getLangFlag, getStatusLabel, CHAPTERS_PER_PAGE
 } = require(path.join(__dirname, "mangaUtils"));
 
-// ─── Search: يفضل الكوري/الصيني مع دعم كامل للمصادر العربية ─────────────────
+// ─── Search ───────────────────────────────────────────────────────────────────
 
 async function searchManhwa(query) {
   const KO_ZH = ["ko", "zh", "zh-hk"];
 
   const [dxKo, dxAll, ckRes, gmRes] = await Promise.allSettled([
-    MangaDex.search(query, { origLangs: KO_ZH, ratings: ["safe", "suggestive", "erotica"], limit: 15 }),
+    MangaDex.search(query, { origLangs: KO_ZH, ratings: ["safe", "suggestive", "erotica"], limit: 20 }),
     MangaDex.search(query, { ratings: ["safe", "suggestive", "erotica"], limit: 10 }),
     ComicK.search(query),
     GManga.search(query)
@@ -49,15 +49,15 @@ module.exports = {
   config: {
     name: "manhwa",
     aliases: ["مانهوا", "manhua", "webtoon", "ويبتون", "manhwas"],
-    version: "5.0",
+    version: "6.0",
     author: "Djamel",
     countDown: 5,
     role: 0,
-    shortDescription: "اقرأ المانهوا الكورية والصينية بالعربية — 8 مصادر",
-    longDescription: "يبحث في GManga · Mangalek · 3asq · MangaSwat · ArTeam · MangaAE · ComicK · MangaDex ويدمج كل الفصول العربية",
+    shortDescription: "اقرأ المانهوا الكورية والصينية بالعربية — 15+ مصدر",
+    longDescription: "يبحث في GManga · Mangalek · 3asq · MangaSwat · TeamX · GalaxyManga · OzulScans · PerfectManga · ArabsManga · KelManga · MangaArab · Onimanga · MangaKey · ComicK · MangaDex · MangaSee",
     category: "anime",
     guide: {
-      en: "{pn} <اسم المانهوا>\nمثال:\n{pn} solo leveling\n{pn} tower of god\n{pn} lookism\n{pn} تقدم — لعرض تقدم القراءة"
+      en: "{pn} <اسم المانهوا>\nمثال:\n{pn} solo leveling\n{pn} tower of god\n{pn} lookism\n{pn} true beauty\n{pn} omniscient reader\n{pn} تقدم — لعرض تقدم القراءة"
     }
   },
 
@@ -67,7 +67,7 @@ module.exports = {
 
     if (!query) {
       return api.sendMessage(
-        "📗 اكتب اسم المانهوا.\n\nأمثلة شهيرة:\n/manhwa solo leveling\n/manhwa tower of god\n/manhwa noblesse\n/manhwa lookism\n/manhwa true beauty\n/manhwa windbreaker\n/manhwa omniscient reader\n\n📡 المصادر العربية:\n🇸🇦 GManga · Mangalek · 3asq · MangaSwat · ArTeam · MangaAE\n🌐 ComicK · MangaDex\n\n/manhwa تقدم — آخر فصل قرأته",
+        "📗 اكتب اسم المانهوا الكورية أو الصينية.\n\nأمثلة شهيرة:\n/manhwa solo leveling\n/manhwa tower of god\n/manhwa noblesse\n/manhwa lookism\n/manhwa true beauty\n/manhwa omniscient reader\n/manhwa windbreaker\n/manhwa the beginning after the end\n/manhwa return of the mount hua sect\n\n📡 المصادر (15+):\n🇸🇦 GManga · Mangalek · 3asq · MangaSwat · TeamX · GalaxyManga\n🇸🇦 OzulScans · PerfectManga · ArabsManga · KelManga · MangaArab\n🌐 ComicK · MangaDex · MangaSee\n\n/manhwa تقدم — آخر فصل قرأته",
         threadID, messageID
       );
     }
@@ -137,14 +137,16 @@ module.exports = {
       api.sendMessage(`⏳ جاري جلب الفصول من كل المصادر العربية...\n📗 "${m.title}"`, threadID);
 
       try {
-        const chapters = await fetchAllChapters(
-          m.title, m._mdxId || null, m._ckHid || null,
-          { ratings: ["safe", "suggestive", "erotica"] }
-        );
+        const chapters = await fetchAllChapters(m, null, null, {
+          ratings: ["safe", "suggestive", "erotica"]
+        });
 
         if (!chapters.length) {
           api.setMessageReaction("❌", messageID, () => {}, true);
-          return api.sendMessage(`❌ لا توجد فصول متاحة لـ "${m.title}".`, threadID, messageID);
+          return api.sendMessage(
+            `❌ لا توجد فصول متاحة لـ "${m.title}".\n💡 جرب باسم مختلف أو مصدر آخر.`,
+            threadID, messageID
+          );
         }
 
         const arCount = chapters.filter(c => c.isAr).length;
