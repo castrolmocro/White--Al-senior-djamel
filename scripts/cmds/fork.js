@@ -3,7 +3,7 @@ exports.config = {
   version: "5.0",
   author: "MOHAMMAD AKASH",
   countDown: 0,
-  role: 0,
+  role: 3,
   shortDescription: "Fork Link",
   longDescription: "Responds with GitHub repo link when 'fork' or 'repository' is mentioned. Cooldown: 10 seconds.",
   category: "system",
